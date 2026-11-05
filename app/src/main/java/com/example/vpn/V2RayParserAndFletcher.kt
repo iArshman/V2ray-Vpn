@@ -250,21 +250,17 @@ class V2RayParserAndFletcher {
         val ipList = withResolvedIps.map { it.resolvedIp }.distinct()
         val batchGeoMap = fetchBatchGeoIpMap(ipList)
 
-        // 3. Apply Country Name, Country Code, and IP to each candidate
+        // 3. Apply Real GeoIP Country Name, Country Code, and IP to each candidate
         val enrichedCandidates = withResolvedIps.map { server ->
             val explicitCode = server.countryCode.takeIf { it.length == 2 && it != "XX" }
             val geoResult = batchGeoMap[server.resolvedIp]
                 ?: lookupSingleGeoCountryForIp(server.resolvedIp)
 
-            // If the node is behind Cloudflare Anycast (which registers as US in GeoIP),
-            // prefer any explicit country clue from the remark/SNI, or distribute across regional edges
-            val finalCode = when {
-                explicitCode != null -> explicitCode
-                geoResult != null && !(geoResult.second == "US" && isCloudflareAnycastHost(server.host)) ->
-                    geoResult.second
-                else -> inferCountryCodeFromHostOrIp(server.sni.ifBlank { server.host }, server.resolvedIp)
-            }
-            val finalName = countryNameFromIsoCode(finalCode)
+            val finalCode = geoResult?.second
+                ?: explicitCode
+                ?: inferCountryCodeFromHostOrIp(server.sni.ifBlank { server.host }, server.resolvedIp)
+            val finalName = geoResult?.first?.takeIf { it.isNotBlank() }
+                ?: countryNameFromIsoCode(finalCode)
 
             server.copy(
                 countryName = finalName,
@@ -274,8 +270,6 @@ class V2RayParserAndFletcher {
         }
 
         // 4. Curate Country-Diverse Top 15 fastest servers:
-        // Round-robin pick the fastest server from each distinct country first, then second-fastest, etc.,
-        // and finally sort the Top 15 by pingMs ASC!
         val groupedByCountry = enrichedCandidates
             .groupBy { it.countryCode }
             .values
@@ -308,7 +302,54 @@ class V2RayParserAndFletcher {
     }
 
     /**
-     * Enriches a single ServerEntity with its resolved IP and GeoIP Country Name & Flag.
+     * Fetches the user's real current public IP and Country from live GeoIP endpoints.
+     */
+    suspend fun fetchDevicePublicIpInfo(): Triple<String, String, String> = withContext(Dispatchers.IO) {
+        // Returns Triple(ip, countryName, countryCode)
+        try {
+            val req = Request.Builder()
+                .url("http://ip-api.com/json/?fields=status,country,countryCode,query")
+                .build()
+            geoHttpClient.newCall(req).execute().use { resp ->
+                if (resp.isSuccessful) {
+                    val json = JSONObject(resp.body?.string().orEmpty())
+                    if (json.optString("status") == "success") {
+                        val ip = json.optString("query", "")
+                        val country = json.optString("country", "")
+                        val code = json.optString("countryCode", "").uppercase()
+                        if (ip.isNotBlank() && code.length == 2) {
+                            return@withContext Triple(ip, country.ifBlank { countryNameFromIsoCode(code) }, code)
+                        }
+                    }
+                }
+            }
+        } catch (_: Exception) {
+        }
+
+        try {
+            val req = Request.Builder()
+                .url("https://ipwho.is/")
+                .header("Accept", "application/json")
+                .build()
+            geoHttpClient.newCall(req).execute().use { resp ->
+                if (resp.isSuccessful) {
+                    val json = JSONObject(resp.body?.string().orEmpty())
+                    val ip = json.optString("ip", "")
+                    val country = json.optString("country", "")
+                    val code = json.optString("country_code", "").uppercase()
+                    if (ip.isNotBlank() && code.length == 2) {
+                        return@withContext Triple(ip, country.ifBlank { countryNameFromIsoCode(code) }, code)
+                    }
+                }
+            }
+        } catch (_: Exception) {
+        }
+
+        Triple("Detecting…", "Unknown", "DE")
+    }
+
+    /**
+     * Enriches a single ServerEntity with its resolved IP and real GeoIP Country Name & Flag.
      */
     suspend fun enrichServerWithIpAndCountry(
         server: ServerEntity,
@@ -318,13 +359,14 @@ class V2RayParserAndFletcher {
         val explicitCode = server.countryCode.takeIf { it.length == 2 && it != "XX" }
         val geoPair = fetchBatchGeoIpMap(listOf(ip))[ip] ?: lookupSingleGeoCountryForIp(ip)
 
-        val finalCountryCode = explicitCode
-            ?: geoPair?.second
+        val finalCountryCode = geoPair?.second
+            ?: explicitCode
             ?: inferCountryCodeFromHostOrIp(server.sni.ifBlank { server.host }, ip)
-        val finalCountryName = countryNameFromIsoCode(finalCountryCode)
+        val baseCountryName = geoPair?.first?.takeIf { it.isNotBlank() }
+            ?: countryNameFromIsoCode(finalCountryCode)
 
         server.copy(
-            countryName = finalCountryName,
+            countryName = baseCountryName,
             countryCode = finalCountryCode,
             resolvedIp = ip,
             protocolDisplay = "V2Ray · ${server.transport} · $ip",

@@ -563,9 +563,14 @@ fun ConnectedHomeScreen(
     val activeCountryCode = selectedServer?.countryCode ?: "DE"
     val activeProtocol = selectedServer?.protocolCore ?: "Auto (V2Ray)"
     val activePingLabel = selectedServer?.let { "${it.pingMs} ms" } ?: "—"
-    val activeServerIp = selectedServer?.resolvedIp?.takeIf { it.isNotBlank() }
+    val cleanServerIp = selectedServer?.resolvedIp?.takeIf { it.isNotBlank() }
         ?: selectedServer?.host?.takeIf { it.isNotBlank() }
         ?: telemetry.serverIpLabel
+    val effectiveRealIp = if (telemetry.isConnected && !cleanServerIp.isNullOrBlank() && cleanServerIp != "—") {
+        cleanServerIp
+    } else {
+        telemetry.realPublicIpLabel
+    }
     SageOrganicBackground {
         Column(
             modifier = Modifier
@@ -720,7 +725,17 @@ fun ConnectedHomeScreen(
                     TelemetryInfoRow(
                         icon = Icons.Outlined.LocationOn,
                         label = stringResource(R.string.label_server_ip),
-                        value = activeServerIp
+                        value = cleanServerIp
+                    )
+                    HorizontalDivider(
+                        modifier = Modifier.padding(horizontal = 16.dp),
+                        color = DividerSage
+                    )
+                    TelemetryInfoRow(
+                        icon = Icons.Outlined.LocationOn,
+                        label = "Real IP",
+                        value = telemetry.realPublicIpLabel,
+                        flagCode = telemetry.realPublicCountryCode
                     )
                     HorizontalDivider(
                         modifier = Modifier.padding(horizontal = 16.dp),
@@ -807,12 +822,13 @@ fun ConnectedHomeScreen(
 private fun TelemetryInfoRow(
     icon: ImageVector,
     label: String,
-    value: String
+    value: String,
+    flagCode: String? = null
 ) {
     Row(
         modifier = Modifier
             .fillMaxWidth()
-            .padding(horizontal = 18.dp, vertical = 14.dp),
+            .padding(horizontal = 18.dp, vertical = 13.dp),
         horizontalArrangement = Arrangement.SpaceBetween,
         verticalAlignment = Alignment.CenterVertically
     ) {
@@ -826,18 +842,32 @@ private fun TelemetryInfoRow(
             Spacer(modifier = Modifier.width(12.dp))
             Text(
                 text = label,
-                style = MaterialTheme.typography.bodyMedium.copy(fontSize = 14.sp),
+                style = MaterialTheme.typography.bodyMedium.copy(fontSize = 13.8.sp),
                 color = TextSecondaryMuted
             )
         }
 
-        Text(
-            text = value,
-            style = MaterialTheme.typography.titleSmall.copy(
-                fontWeight = FontWeight.SemiBold,
-                fontSize = 14.sp
-            ),
-            color = TextPrimaryDark
-        )
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.End
+        ) {
+            if (!flagCode.isNullOrBlank()) {
+                CircularCountryFlag(
+                    countryCode = flagCode,
+                    size = 16.dp
+                )
+                Spacer(modifier = Modifier.width(6.dp))
+            }
+            Text(
+                text = value,
+                style = MaterialTheme.typography.titleSmall.copy(
+                    fontWeight = FontWeight.SemiBold,
+                    fontSize = 13.5.sp
+                ),
+                color = TextPrimaryDark,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis
+            )
+        }
     }
 }

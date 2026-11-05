@@ -171,7 +171,7 @@ interface VpnDao {
 
 @Database(
     entities = [ServerEntity::class, SubscriptionEntity::class],
-    version = 4,
+    version = 6,
     exportSchema = false
 )
 abstract class VpnDatabase : RoomDatabase() {

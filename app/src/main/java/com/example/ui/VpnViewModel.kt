@@ -48,7 +48,9 @@ data class ConnectionTelemetryState(
     val elapsedSeconds: Long = 0L,
     val uploadBytes: Long = 0L,
     val downloadBytes: Long = 0L,
-    val serverIpLabel: String = "—"
+    val serverIpLabel: String = "—",
+    val realPublicIpLabel: String = "Detecting…",
+    val realPublicCountryCode: String = "DE"
 ) {
     val formattedTimer: String
         get() {
@@ -161,8 +163,21 @@ class VpnViewModel(application: Application) : AndroidViewModel(application) {
     private var baselineRxBytes: Long = 0L
 
     init {
+        refreshRealPublicIp()
         initializeLiveServersOnStartup()
         startRealTrafficTelemetryLoop()
+    }
+
+    fun refreshRealPublicIp() {
+        viewModelScope.launch {
+            val (ip, country, code) = fletcher.fetchDevicePublicIpInfo()
+            _telemetry.update {
+                it.copy(
+                    realPublicIpLabel = "$ip · $country",
+                    realPublicCountryCode = code
+                )
+            }
+        }
     }
 
     /**
@@ -304,14 +319,16 @@ class VpnViewModel(application: Application) : AndroidViewModel(application) {
         baselineTxBytes = safeTrafficStat { TrafficStats.getTotalTxBytes() }
         baselineRxBytes = safeTrafficStat { TrafficStats.getTotalRxBytes() }
 
-        _telemetry.update {
+        _telemetry.update { prev ->
             ConnectionTelemetryState(
                 isConnected = true,
                 isConnecting = false,
                 elapsedSeconds = 0L,
                 uploadBytes = 0L,
                 downloadBytes = 0L,
-                serverIpLabel = resolvedIp
+                serverIpLabel = resolvedIp,
+                realPublicIpLabel = prev.realPublicIpLabel,
+                realPublicCountryCode = prev.realPublicCountryCode
             )
         }
         startAndroidVpnService(server)
