@@ -1,0 +1,6 @@
+{
+  "summary": "Updated implementation plan matching the exact 5-screen sage/mint Material 3 UI/UX reference image provided by the user: (1) V2Ray VPN Splash/Fetching screen, (2) Auto-Fetched Server List with filter pills and Top 15 ping ranking, (3) Connected Dashboard with organic layered emerald waves, Germany pill selector, 5-row telemetry card, and coral Disconnect button, (4) Settings screen with Configuration/Connection/App cards, and (5) Add Server screen with Subscription/Manual/QR Code tabs, Add & Fetch button, and Clipboard importer.",
+  "updatedAt": "2026-11-04T17:38:43.040724531Z",
+  "requestFeedback": true,
+  "userFacing": true
+}
