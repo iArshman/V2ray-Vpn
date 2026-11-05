@@ -163,9 +163,49 @@ class VpnViewModel(application: Application) : AndroidViewModel(application) {
     private var baselineRxBytes: Long = 0L
 
     init {
+        observeVpnServiceState()
         refreshRealPublicIp()
         initializeLiveServersOnStartup()
         startRealTrafficTelemetryLoop()
+    }
+
+    /**
+     * Keeps UI connection state strictly synchronized with the real Android OS XrayVpnService.
+     * If the OS VPN service stops, fails to establish, or is revoked in system settings,
+     * the UI immediately shows Disconnected.
+     */
+    private fun observeVpnServiceState() {
+        viewModelScope.launch {
+            XrayVpnService.isServiceRunning.collect { running ->
+                if (running) {
+                    baselineTxBytes = safeTrafficStat { TrafficStats.getTotalTxBytes() }
+                    baselineRxBytes = safeTrafficStat { TrafficStats.getTotalRxBytes() }
+                    _telemetry.update {
+                        it.copy(
+                            isConnected = true,
+                            isConnecting = false,
+                            elapsedSeconds = 0L,
+                            uploadBytes = 0L,
+                            downloadBytes = 0L
+                        )
+                    }
+                } else {
+                    _telemetry.update {
+                        it.copy(
+                            isConnected = false,
+                            isConnecting = false
+                        )
+                    }
+                }
+            }
+        }
+        viewModelScope.launch {
+            XrayVpnService.lastError.collect { err ->
+                if (!err.isNullOrBlank()) {
+                    showMessage(err)
+                }
+            }
+        }
     }
 
     fun refreshRealPublicIp() {
@@ -187,14 +227,20 @@ class VpnViewModel(application: Application) : AndroidViewModel(application) {
     private fun initializeLiveServersOnStartup() {
         viewModelScope.launch {
             val existing = dao.getAllServersOnce()
+            val canAutoConnect = _settings.value.startOnAppOpen &&
+                android.net.VpnService.prepare(getApplication()) == null
             if (existing.isEmpty() || _settings.value.autoConfigure) {
                 runFletcherAutoFetchAndPingSweep(
-                    returnScreen = if (_settings.value.startOnAppOpen) VpnScreen.CONNECTED_HOME else VpnScreen.SERVER_LIST,
-                    autoConnectAfterFetch = _settings.value.startOnAppOpen
+                    returnScreen = VpnScreen.CONNECTED_HOME,
+                    autoConnectAfterFetch = canAutoConnect
                 )
             } else {
                 _screenStack.value = listOf(VpnScreen.CONNECTED_HOME)
                 _currentScreen.value = VpnScreen.CONNECTED_HOME
+                if (canAutoConnect) {
+                    val active = existing.firstOrNull { it.isSelected } ?: existing.first()
+                    connectToServer(active)
+                }
             }
         }
     }
@@ -303,9 +349,16 @@ class VpnViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     private suspend fun connectToServer(server: ServerEntity) {
+        // Never claim Connected if Android OS VPN consent hasn't been granted yet
+        if (android.net.VpnService.prepare(getApplication()) != null) {
+            _telemetry.update { it.copy(isConnecting = false, isConnected = false) }
+            showMessage("Tap Connect and accept the Android VPN prompt to start the tunnel")
+            return
+        }
+
         _telemetry.update { it.copy(isConnecting = true) }
         val livePing = withContext(Dispatchers.IO) {
-            fletcher.measureRealTcpLatencyOrNull(server.host, server.port, timeoutMs = 2000)
+            fletcher.measureRealTcpLatencyOrNull(server.host, server.port, timeoutMs = 2200)
         }
         if (livePing == null) {
             _telemetry.update { it.copy(isConnecting = false, isConnected = false) }
@@ -313,26 +366,21 @@ class VpnViewModel(application: Application) : AndroidViewModel(application) {
             return
         }
 
-        val resolvedIp = fletcher.resolveServerIpAddress(server.host)
-        dao.updateServer(server.copy(pingMs = livePing, isSelected = true))
-
-        baselineTxBytes = safeTrafficStat { TrafficStats.getTotalTxBytes() }
-        baselineRxBytes = safeTrafficStat { TrafficStats.getTotalRxBytes() }
+        val resolvedIp = server.resolvedIp.ifBlank { fletcher.resolveServerIpAddress(server.host) }
+        val updatedServer = server.copy(
+            pingMs = livePing,
+            resolvedIp = resolvedIp,
+            isSelected = true
+        )
+        dao.updateServer(updatedServer)
 
         _telemetry.update { prev ->
-            ConnectionTelemetryState(
-                isConnected = true,
-                isConnecting = false,
-                elapsedSeconds = 0L,
-                uploadBytes = 0L,
-                downloadBytes = 0L,
-                serverIpLabel = resolvedIp,
-                realPublicIpLabel = prev.realPublicIpLabel,
-                realPublicCountryCode = prev.realPublicCountryCode
+            prev.copy(
+                serverIpLabel = resolvedIp
             )
         }
-        startAndroidVpnService(server)
-        showMessage("Connected to ${server.countryName} ($livePing ms)")
+        startAndroidVpnService(updatedServer)
+        showMessage("Connecting to ${server.countryName} ($livePing ms)…")
     }
 
     /**
@@ -692,17 +740,26 @@ class VpnViewModel(application: Application) : AndroidViewModel(application) {
         try {
             val ctx = getApplication<Application>()
             val currentSettings = _settings.value
+            val xrayJson = server.rawConfigJson.ifBlank { fletcher.generateXrayJsonForServer(server) }
             val intent = Intent(ctx, XrayVpnService::class.java).apply {
                 action = XrayVpnService.ACTION_CONNECT
                 putExtra(XrayVpnService.EXTRA_SERVER_COUNTRY, server.countryName)
                 putExtra(XrayVpnService.EXTRA_SERVER_HOST, server.host)
+                putExtra(XrayVpnService.EXTRA_SERVER_PORT, server.port)
                 putExtra(XrayVpnService.EXTRA_SERVER_PROTOCOL, server.protocolCore)
+                putExtra(XrayVpnService.EXTRA_XRAY_JSON, xrayJson)
                 putExtra(XrayVpnService.EXTRA_ENABLE_IPV6, currentSettings.ipv6Enabled)
                 putExtra(XrayVpnService.EXTRA_DNS_MODE, currentSettings.dnsMode)
                 putExtra(XrayVpnService.EXTRA_ROUTING_MODE, currentSettings.routingMode)
             }
-            ctx.startService(intent)
-        } catch (_: Exception) {
+            if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O) {
+                ctx.startForegroundService(intent)
+            } else {
+                ctx.startService(intent)
+            }
+        } catch (e: Exception) {
+            _telemetry.update { it.copy(isConnecting = false, isConnected = false) }
+            showMessage("Could not start VPN service: ${e.message}")
         }
     }
 

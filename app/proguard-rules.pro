@@ -9,9 +9,13 @@
 -keep @androidx.room.Dao interface * { *; }
 -keep class com.example.data.** { *; }
 
-# Keep Android VpnService and MainActivity entry points
+# Keep Android VpnService, MainActivity, and optional native libv2ray / go JNI bindings
 -keep class com.example.vpn.XrayVpnService { *; }
 -keep class com.example.MainActivity { *; }
+-keep class libv2ray.** { *; }
+-keep class go.** { *; }
+-dontwarn libv2ray.**
+-dontwarn go.**
 
 # Kotlin Coroutines & Flow rules for R8
 -keepnames class kotlinx.coroutines.internal.MainDispatcherFactory {}

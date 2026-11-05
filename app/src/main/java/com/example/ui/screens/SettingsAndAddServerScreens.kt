@@ -38,8 +38,8 @@ import androidx.compose.material.icons.outlined.PlayArrow
 import androidx.compose.material.icons.outlined.QrCodeScanner
 import androidx.compose.material.icons.outlined.Schedule
 import androidx.compose.material.icons.outlined.Shield
-import androidx.compose.material.icons.outlined.Sync
 import androidx.compose.material.icons.outlined.SwapHoriz
+import androidx.compose.material.icons.outlined.Sync
 import androidx.compose.material.icons.outlined.VisibilityOff
 import androidx.compose.material.icons.rounded.AccountTree
 import androidx.compose.material.icons.rounded.Download
@@ -49,6 +49,8 @@ import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.RadioButton
+import androidx.compose.material3.RadioButtonDefaults
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
 import androidx.compose.material3.SwitchDefaults
@@ -79,34 +81,82 @@ import com.example.data.AppSettingsState
 import com.example.data.ServerEntity
 import com.example.ui.AddServerTab
 import com.example.ui.components.SageOrganicBackground
+import com.example.ui.theme.DisconnectCrimson
 import com.example.ui.theme.DividerSage
 import com.example.ui.theme.EmeraldSwitchActive
 import com.example.ui.theme.ForestEmerald
 import com.example.ui.theme.InputFieldBg
 import com.example.ui.theme.JetBrainsMonoFamily
 import com.example.ui.theme.PureWhiteCard
+import com.example.ui.theme.SelectedMintCard
 import com.example.ui.theme.SubtleCardBorder
 import com.example.ui.theme.TextPrimaryDark
 import com.example.ui.theme.TextSecondaryMuted
 import com.example.ui.theme.TextTertiaryHint
 
+data class SettingChoiceOption(
+    val value: String,
+    val subtitle: String
+)
+
+private enum class ActiveSettingDialog {
+    UPDATE_INTERVAL,
+    PROTOCOL,
+    ROUTING_MODE,
+    DNS_PROVIDER,
+    CLEAR_CACHE_CONFIRM
+}
+
+private val UPDATE_INTERVAL_OPTIONS = listOf(
+    SettingChoiceOption("15 min", "High-frequency auto-refresh"),
+    SettingChoiceOption("30 min", "Balanced refresh interval"),
+    SettingChoiceOption("1 hour", "Recommended standard interval"),
+    SettingChoiceOption("6 hours", "Battery-saving interval"),
+    SettingChoiceOption("12 hours", "Twice-daily subscription refresh"),
+    SettingChoiceOption("24 hours", "Daily subscription refresh")
+)
+
+private val PROTOCOL_OPTIONS = listOf(
+    SettingChoiceOption("Auto (V2Ray)", "Automatically use the fastest available V2Ray/Xray protocol"),
+    SettingChoiceOption("VLESS (Reality)", "Xray Reality TLS camouflage with ultra-low latency"),
+    SettingChoiceOption("VLESS (WS / TCP)", "Lightweight stateless V2Ray VLESS transport"),
+    SettingChoiceOption("VMess (WebSocket)", "Encrypted V2Ray WebSocket tunnel"),
+    SettingChoiceOption("Trojan (TLS)", "HTTPS-disguised TLS tunnel"),
+    SettingChoiceOption("gRPC", "Multiplexed HTTP/2 gRPC stream transport"),
+    SettingChoiceOption("Shadowsocks", "Fast stream/AEAD cipher proxy")
+)
+
+private val ROUTING_MODE_OPTIONS = listOf(
+    SettingChoiceOption("Global", "Route all device traffic through the VPN tunnel"),
+    SettingChoiceOption("Bypass LAN", "Tunnel internet traffic while keeping local LAN (192.168.x.x) direct"),
+    SettingChoiceOption("Bypass LAN & Domestic", "Keep local & domestic subnets direct; tunnel international traffic"),
+    SettingChoiceOption("Direct Only", "Diagnostic mode with direct connection")
+)
+
+private val DNS_PROVIDER_OPTIONS = listOf(
+    SettingChoiceOption("Auto (DoH)", "Encrypted DNS-over-HTTPS (1.1.1.1 / 1.0.0.1)"),
+    SettingChoiceOption("Cloudflare 1.1.1.1", "Fast privacy-first DNS resolver (1.1.1.1)"),
+    SettingChoiceOption("Google 8.8.8.8", "Reliable global DNS resolver (8.8.8.8)"),
+    SettingChoiceOption("Quad9 9.9.9.9", "Security & malware-blocking DNS (9.9.9.9)"),
+    SettingChoiceOption("AdGuard 94.140.14.14", "Ad-blocking and tracker-filtering DNS (94.140.14.14)")
+)
+
 /**
  * SCREEN 4: Settings Screen
- * Matches the 4th phone in the user's reference screenshot pixel-for-pixel.
+ * Opens interactive selection dialogs showing all available options when Protocol, Routing Mode,
+ * DNS, or Update Interval are tapped so the user can inspect and choose their preferred option.
  */
 @Composable
 fun SettingsScreen(
     settings: AppSettingsState,
     onUpdateSettings: ((AppSettingsState) -> AppSettingsState) -> Unit,
-    onCycleInterval: () -> Unit,
-    onCycleProtocol: () -> Unit,
-    onCycleRouting: () -> Unit,
-    onCycleDns: () -> Unit,
     onOpenAddSubscription: () -> Unit,
     onClearCache: () -> Unit,
     onBack: () -> Unit
 ) {
     BackHandler { onBack() }
+
+    var activeDialog by remember { mutableStateOf<ActiveSettingDialog?>(null) }
 
     SageOrganicBackground {
         Column(
@@ -147,7 +197,7 @@ fun SettingsScreen(
                     title = stringResource(R.string.setting_update_interval),
                     subtitle = stringResource(R.string.setting_update_interval_sub),
                     valueText = settings.updateIntervalLabel,
-                    onClick = onCycleInterval,
+                    onClick = { activeDialog = ActiveSettingDialog.UPDATE_INTERVAL },
                     testTag = "row_update_interval"
                 )
                 HorizontalDivider(modifier = Modifier.padding(horizontal = 16.dp), color = DividerSage)
@@ -170,7 +220,7 @@ fun SettingsScreen(
                     title = stringResource(R.string.setting_protocol),
                     subtitle = null,
                     valueText = settings.protocolPreference,
-                    onClick = onCycleProtocol,
+                    onClick = { activeDialog = ActiveSettingDialog.PROTOCOL },
                     testTag = "row_protocol"
                 )
                 HorizontalDivider(modifier = Modifier.padding(horizontal = 16.dp), color = DividerSage)
@@ -179,7 +229,7 @@ fun SettingsScreen(
                     title = stringResource(R.string.setting_routing_mode),
                     subtitle = null,
                     valueText = settings.routingMode,
-                    onClick = onCycleRouting,
+                    onClick = { activeDialog = ActiveSettingDialog.ROUTING_MODE },
                     testTag = "row_routing_mode"
                 )
                 HorizontalDivider(modifier = Modifier.padding(horizontal = 16.dp), color = DividerSage)
@@ -188,7 +238,7 @@ fun SettingsScreen(
                     title = stringResource(R.string.setting_dns),
                     subtitle = null,
                     valueText = settings.dnsMode,
-                    onClick = onCycleDns,
+                    onClick = { activeDialog = ActiveSettingDialog.DNS_PROVIDER },
                     testTag = "row_dns"
                 )
                 HorizontalDivider(modifier = Modifier.padding(horizontal = 16.dp), color = DividerSage)
@@ -246,7 +296,7 @@ fun SettingsScreen(
                     title = stringResource(R.string.setting_clear_cache),
                     subtitle = stringResource(R.string.setting_clear_cache_sub),
                     valueText = null,
-                    onClick = onClearCache,
+                    onClick = { activeDialog = ActiveSettingDialog.CLEAR_CACHE_CONFIRM },
                     testTag = "row_clear_cache"
                 )
             }
@@ -254,11 +304,196 @@ fun SettingsScreen(
             Spacer(modifier = Modifier.height(28.dp))
         }
     }
+
+    when (activeDialog) {
+        ActiveSettingDialog.UPDATE_INTERVAL -> {
+            SettingOptionPickerDialog(
+                title = "Select Update Interval",
+                options = UPDATE_INTERVAL_OPTIONS,
+                selectedValue = settings.updateIntervalLabel,
+                onSelect = { chosen ->
+                    onUpdateSettings {
+                        it.copy(updateIntervalLabel = chosen, subUpdateInterval = chosen)
+                    }
+                    activeDialog = null
+                },
+                onDismiss = { activeDialog = null }
+            )
+        }
+
+        ActiveSettingDialog.PROTOCOL -> {
+            SettingOptionPickerDialog(
+                title = "Select V2Ray / Xray Protocol",
+                options = PROTOCOL_OPTIONS,
+                selectedValue = settings.protocolPreference,
+                onSelect = { chosen ->
+                    onUpdateSettings { it.copy(protocolPreference = chosen) }
+                    activeDialog = null
+                },
+                onDismiss = { activeDialog = null }
+            )
+        }
+
+        ActiveSettingDialog.ROUTING_MODE -> {
+            SettingOptionPickerDialog(
+                title = "Select Routing Mode",
+                options = ROUTING_MODE_OPTIONS,
+                selectedValue = settings.routingMode,
+                onSelect = { chosen ->
+                    onUpdateSettings { it.copy(routingMode = chosen) }
+                    activeDialog = null
+                },
+                onDismiss = { activeDialog = null }
+            )
+        }
+
+        ActiveSettingDialog.DNS_PROVIDER -> {
+            SettingOptionPickerDialog(
+                title = "Select DNS Provider",
+                options = DNS_PROVIDER_OPTIONS,
+                selectedValue = settings.dnsMode,
+                onSelect = { chosen ->
+                    onUpdateSettings { it.copy(dnsMode = chosen) }
+                    activeDialog = null
+                },
+                onDismiss = { activeDialog = null }
+            )
+        }
+
+        ActiveSettingDialog.CLEAR_CACHE_CONFIRM -> {
+            AlertDialog(
+                onDismissRequest = { activeDialog = null },
+                containerColor = PureWhiteCard,
+                shape = RoundedCornerShape(24.dp),
+                title = {
+                    Text(
+                        text = "Clear Cached Servers?",
+                        style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.Bold),
+                        color = TextPrimaryDark
+                    )
+                },
+                text = {
+                    Text(
+                        text = "This will remove all currently cached servers from your device. You can fetch fresh servers anytime from your subscription link.",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = TextSecondaryMuted
+                    )
+                },
+                confirmButton = {
+                    TextButton(
+                        onClick = {
+                            activeDialog = null
+                            onClearCache()
+                        }
+                    ) {
+                        Text("Clear Cache", color = DisconnectCrimson, fontWeight = FontWeight.SemiBold)
+                    }
+                },
+                dismissButton = {
+                    TextButton(onClick = { activeDialog = null }) {
+                        Text("Cancel", color = TextSecondaryMuted)
+                    }
+                }
+            )
+        }
+
+        null -> Unit
+    }
+}
+
+/**
+ * Reusable Material 3 option picker dialog showing all available choices with radio buttons
+ * and subtitles so the user can inspect and choose their preferred setting.
+ */
+@Composable
+fun SettingOptionPickerDialog(
+    title: String,
+    options: List<SettingChoiceOption>,
+    selectedValue: String,
+    onSelect: (String) -> Unit,
+    onDismiss: () -> Unit
+) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        containerColor = PureWhiteCard,
+        shape = RoundedCornerShape(24.dp),
+        title = {
+            Text(
+                text = title,
+                style = MaterialTheme.typography.titleMedium.copy(
+                    fontWeight = FontWeight.Bold,
+                    fontSize = 18.sp
+                ),
+                color = TextPrimaryDark
+            )
+        },
+        text = {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .verticalScroll(rememberScrollState()),
+                verticalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                options.forEach { option ->
+                    val isSelected = option.value == selectedValue
+                    Surface(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clip(RoundedCornerShape(16.dp))
+                            .clickable { onSelect(option.value) },
+                        shape = RoundedCornerShape(16.dp),
+                        color = if (isSelected) SelectedMintCard else InputFieldBg,
+                        border = BorderStroke(
+                            width = 1.dp,
+                            color = if (isSelected) ForestEmerald.copy(alpha = 0.4f) else SubtleCardBorder
+                        )
+                    ) {
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(horizontal = 12.dp, vertical = 10.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            RadioButton(
+                                selected = isSelected,
+                                onClick = { onSelect(option.value) },
+                                colors = RadioButtonDefaults.colors(
+                                    selectedColor = ForestEmerald,
+                                    unselectedColor = TextSecondaryMuted
+                                )
+                            )
+                            Spacer(modifier = Modifier.width(6.dp))
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(
+                                    text = option.value,
+                                    style = MaterialTheme.typography.titleSmall.copy(
+                                        fontWeight = FontWeight.SemiBold,
+                                        fontSize = 14.sp
+                                    ),
+                                    color = TextPrimaryDark
+                                )
+                                Spacer(modifier = Modifier.height(2.dp))
+                                Text(
+                                    text = option.subtitle,
+                                    style = MaterialTheme.typography.bodySmall.copy(fontSize = 12.sp),
+                                    color = TextSecondaryMuted
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = onDismiss) {
+                Text("Close", color = ForestEmerald, fontWeight = FontWeight.SemiBold)
+            }
+        }
+    )
 }
 
 /**
  * SCREEN 5: Add Server Screen ("Add Server")
- * Matches the 5th phone in the user's reference screenshot, including Subscription, Manual (with Raw Xray JSON), and QR Code tabs.
  */
 @Composable
 fun AddServerScreen(
@@ -278,7 +513,6 @@ fun AddServerScreen(
         rawJson: String
     ) -> Unit,
     onUpdateSettings: ((AppSettingsState) -> AppSettingsState) -> Unit,
-    onCycleInterval: () -> Unit,
     onBack: () -> Unit
 ) {
     BackHandler { onBack() }
@@ -287,8 +521,9 @@ fun AddServerScreen(
     var subscriptionUrl by remember(settings.activeSubscriptionUrl) {
         mutableStateOf(settings.activeSubscriptionUrl)
     }
+    var showIntervalPicker by remember { mutableStateOf(false) }
 
-    // Manual / Raw JSON state (clean empty inputs for real custom servers)
+    // Manual / Raw JSON state
     var manualCountry by remember { mutableStateOf("") }
     var manualHost by remember { mutableStateOf("") }
     var manualPort by remember { mutableStateOf("443") }
@@ -571,7 +806,7 @@ fun AddServerScreen(
                             title = stringResource(R.string.setting_update_interval),
                             subtitle = null,
                             valueText = settings.subUpdateInterval,
-                            onClick = onCycleInterval,
+                            onClick = { showIntervalPicker = true },
                             testTag = "row_sub_update_interval"
                         )
                         HorizontalDivider(modifier = Modifier.padding(horizontal = 16.dp), color = DividerSage)
@@ -625,7 +860,6 @@ fun AddServerScreen(
                 }
 
                 AddServerTab.MANUAL -> {
-                    // Custom Server & Raw Xray JSON Editor Card
                     Surface(
                         modifier = Modifier
                             .fillMaxWidth()
@@ -848,6 +1082,21 @@ fun AddServerScreen(
 
             Spacer(modifier = Modifier.height(28.dp))
         }
+    }
+
+    if (showIntervalPicker) {
+        SettingOptionPickerDialog(
+            title = "Select Update Interval",
+            options = UPDATE_INTERVAL_OPTIONS,
+            selectedValue = settings.subUpdateInterval,
+            onSelect = { chosen ->
+                onUpdateSettings {
+                    it.copy(updateIntervalLabel = chosen, subUpdateInterval = chosen)
+                }
+                showIntervalPicker = false
+            },
+            onDismiss = { showIntervalPicker = false }
+        )
     }
 }
 

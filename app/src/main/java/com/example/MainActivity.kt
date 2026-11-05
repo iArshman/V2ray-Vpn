@@ -91,8 +91,12 @@ fun V2RayVpnApp(
     // Android VpnService system consent launcher
     val vpnPermissionLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.StartActivityForResult()
-    ) {
-        vpnViewModel.toggleConnection()
+    ) { result ->
+        if (result.resultCode == Activity.RESULT_OK) {
+            vpnViewModel.toggleConnection()
+        } else {
+            vpnViewModel.showMessage("VPN permission was denied")
+        }
     }
 
     val requestOrToggleVpn = {
@@ -130,7 +134,18 @@ fun V2RayVpnApp(
                         selectedFilter = selectedFilter,
                         onSelectFilter = vpnViewModel::setFilter,
                         onSelectServer = { server ->
-                            vpnViewModel.selectAndConnectServer(server, openConnectedScreen = true)
+                            val prepareIntent = try {
+                                VpnService.prepare(context)
+                            } catch (_: Exception) {
+                                null
+                            }
+                            vpnViewModel.selectAndConnectServer(
+                                server = server,
+                                openConnectedScreen = true
+                            )
+                            if (prepareIntent != null && context is Activity) {
+                                vpnPermissionLauncher.launch(prepareIntent)
+                            }
                         },
                         onRefreshFletcher = {
                             vpnViewModel.runFletcherAutoFetchAndPingSweep(
@@ -175,10 +190,6 @@ fun V2RayVpnApp(
                     SettingsScreen(
                         settings = settings,
                         onUpdateSettings = vpnViewModel::updateSettings,
-                        onCycleInterval = vpnViewModel::cycleUpdateInterval,
-                        onCycleProtocol = vpnViewModel::cycleProtocolPreference,
-                        onCycleRouting = vpnViewModel::cycleRoutingMode,
-                        onCycleDns = vpnViewModel::cycleDnsMode,
                         onOpenAddSubscription = {
                             vpnViewModel.navigateTo(VpnScreen.ADD_SERVER)
                         },
@@ -200,7 +211,6 @@ fun V2RayVpnApp(
                         onImportClipboardText = vpnViewModel::importFromTextOrClipboard,
                         onAddManualServer = vpnViewModel::addManualCustomServer,
                         onUpdateSettings = vpnViewModel::updateSettings,
-                        onCycleInterval = vpnViewModel::cycleUpdateInterval,
                         onBack = {
                             if (!vpnViewModel.navigateBack()) {
                                 vpnViewModel.navigateTo(VpnScreen.SERVER_LIST)

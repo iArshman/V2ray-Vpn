@@ -65,7 +65,7 @@ data class AppSettingsState(
     val dnsMode: String = "Auto (DoH)",
     val tunMode: Boolean = true,
     val ipv6Enabled: Boolean = false,
-    val startOnAppOpen: Boolean = true,
+    val startOnAppOpen: Boolean = false,
     val hideFromRecentApps: Boolean = false,
     val subAutoUpdate: Boolean = true,
     val subUpdateInterval: String = "1 hour",
@@ -90,7 +90,7 @@ class VpnPreferencesStore(context: Context) {
             dnsMode = prefs.getString("dns_mode", "Auto (DoH)") ?: "Auto (DoH)",
             tunMode = prefs.getBoolean("tun_mode", true),
             ipv6Enabled = prefs.getBoolean("ipv6_enabled", false),
-            startOnAppOpen = prefs.getBoolean("start_on_open", true),
+            startOnAppOpen = prefs.getBoolean("start_on_open_v2", false),
             hideFromRecentApps = prefs.getBoolean("hide_recents", false),
             subAutoUpdate = prefs.getBoolean("sub_auto_update", true),
             subUpdateInterval = prefs.getString("sub_update_interval", "1 hour") ?: "1 hour",
@@ -111,7 +111,7 @@ class VpnPreferencesStore(context: Context) {
             .putString("dns_mode", state.dnsMode)
             .putBoolean("tun_mode", state.tunMode)
             .putBoolean("ipv6_enabled", state.ipv6Enabled)
-            .putBoolean("start_on_open", state.startOnAppOpen)
+            .putBoolean("start_on_open_v2", state.startOnAppOpen)
             .putBoolean("hide_recents", state.hideFromRecentApps)
             .putBoolean("sub_auto_update", state.subAutoUpdate)
             .putString("sub_update_interval", state.subUpdateInterval)
