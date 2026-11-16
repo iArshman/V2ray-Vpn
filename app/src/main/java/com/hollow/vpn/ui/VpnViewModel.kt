@@ -10,6 +10,9 @@ import com.hollow.vpn.data.ServerFilter
 import com.hollow.vpn.data.SubscriptionEntity
 import com.hollow.vpn.data.VpnDatabase
 import com.hollow.vpn.data.VpnPreferencesStore
+import com.hollow.vpn.vpn.GeoAssetManager
+import com.hollow.vpn.vpn.HollowJobScheduler
+import com.hollow.vpn.vpn.SecurityPolicy
 import com.hollow.vpn.vpn.V2RayParserAndFletcher
 import com.hollow.vpn.vpn.XrayProbeResult
 import com.hollow.vpn.vpn.XrayVpnService
@@ -142,6 +145,9 @@ class VpnViewModel(application: Application) : AndroidViewModel(application) {
     private val _sharingQrServer = MutableStateFlow<ServerEntity?>(null)
     val sharingQrServer: StateFlow<ServerEntity?> = _sharingQrServer.asStateFlow()
 
+    private val _geoAssetsStatus = MutableStateFlow(GeoAssetManager.getGeoAssetsSummary(application))
+    val geoAssetsStatus: StateFlow<String> = _geoAssetsStatus.asStateFlow()
+
     val allServers: StateFlow<List<ServerEntity>> = dao.observeAllServers()
         .stateIn(
             scope = viewModelScope,
@@ -228,6 +234,7 @@ class VpnViewModel(application: Application) : AndroidViewModel(application) {
         refreshRealPublicIp()
         initializeLiveServersOnStartup()
         startSubscriptionAutoUpdateLoop()
+        HollowJobScheduler.schedulePeriodicMaintenance(getApplication(), _settings.value)
     }
 
     /**
@@ -308,6 +315,14 @@ class VpnViewModel(application: Application) : AndroidViewModel(application) {
                     }
                     showMessage(err)
                     XrayVpnService.clearLastError()
+                }
+            }
+        }
+        viewModelScope.launch {
+            XrayVpnService.serviceNotice.collect { notice ->
+                if (!notice.isNullOrBlank()) {
+                    showMessage(notice)
+                    XrayVpnService.clearServiceNotice()
                 }
             }
         }
@@ -410,14 +425,7 @@ class VpnViewModel(application: Application) : AndroidViewModel(application) {
             onResult(Result.failure(IllegalArgumentException("Please enter a valid subscription URL")))
             return
         }
-        if (input.startsWith("vmess://") ||
-            input.startsWith("vless://") ||
-            input.startsWith("trojan://") ||
-            input.startsWith("ss://") ||
-            input.startsWith("hy2://") ||
-            input.startsWith("hysteria2://") ||
-            input.startsWith("{")
-        ) {
+        if (isDirectServerInput(input)) {
             importConfigInOnboarding(input, onResult)
             return
         }
@@ -502,15 +510,32 @@ class VpnViewModel(application: Application) : AndroidViewModel(application) {
                 if (_telemetry.value.isConnecting || _currentScreen.value == VpnScreen.SPLASH_FETCHING) continue
 
                 val intervalMs = parseIntervalMillis(current.updateIntervalLabel)
-                val latestSub = dao.getSubscriptionsOnce().firstOrNull()
+                val subs = dao.getSubscriptionsOnce()
+                val enabledSubs = subs.filter { it.isEnabled && it.url.isNotBlank() }
+                val latestSub = enabledSubs.maxByOrNull { it.lastFetchedAt } ?: subs.firstOrNull()
                 val lastFetched = latestSub?.lastFetchedAt ?: 0L
-                val targetUrl = latestSub?.url?.takeIf { it.isNotBlank() } ?: current.activeSubscriptionUrl
+                val fallbackUrls = listOfNotNull(current.activeSubscriptionUrl.trim().takeIf { it.isNotBlank() })
 
-                if (lastFetched > 0L && System.currentTimeMillis() - lastFetched >= intervalMs && targetUrl.isNotBlank()) {
-                    val result = fletcher.fetchSubscriptionAndRankTop15(
-                        subscriptionUrl = targetUrl,
+                if (lastFetched > 0L && System.currentTimeMillis() - lastFetched >= intervalMs &&
+                    (enabledSubs.isNotEmpty() || fallbackUrls.isNotEmpty())
+                ) {
+                    val result = fletcher.fetchMultipleSubscriptionsAndRankTop15(
+                        subscriptions = enabledSubs,
+                        fallbackUrls = fallbackUrls,
                         context = getApplication(),
-                        settings = current
+                        settings = current,
+                        onSubscriptionStats = { sub, ok, count ->
+                            val updatedSub = if (ok) {
+                                sub.copy(
+                                    successPulls = sub.successPulls + 1,
+                                    lastFetchedAt = System.currentTimeMillis(),
+                                    serverCount = count
+                                )
+                            } else {
+                                sub.copy(failedPulls = sub.failedPulls + 1)
+                            }
+                            dao.updateSubscription(updatedSub)
+                        }
                     )
                     result.onSuccess { ranked ->
                         if (current.subReplaceExisting) {
@@ -519,17 +544,6 @@ class VpnViewModel(application: Application) : AndroidViewModel(application) {
                         dao.clearSelection()
                         val marked = ranked.mapIndexed { index, srv -> srv.copy(isSelected = index == 0) }
                         dao.insertServers(marked)
-                        dao.deleteSubscriptionByUrl(targetUrl)
-                        dao.insertSubscription(
-                            SubscriptionEntity(
-                                url = targetUrl,
-                                autoUpdate = current.subAutoUpdate,
-                                updateIntervalHours = (intervalMs / 3_600_000L).toInt().coerceAtLeast(1),
-                                replaceExisting = current.subReplaceExisting,
-                                lastFetchedAt = System.currentTimeMillis(),
-                                serverCount = marked.size
-                            )
-                        )
                     }
                 }
             }
@@ -646,6 +660,12 @@ class VpnViewModel(application: Application) : AndroidViewModel(application) {
             return
         }
 
+        if (_settings.value.strictTlsEnabled && !SecurityPolicy.isServerSecure(server)) {
+            _telemetry.update { it.copy(isConnecting = false, isConnected = false) }
+            showMessage("Strict TLS blocked ${server.countryName}: insecure TLS or plaintext node")
+            return
+        }
+
         XrayVpnService.clearLastError()
         _telemetry.update { it.copy(isConnecting = true, connectingStage = 1) }
 
@@ -664,6 +684,7 @@ class VpnViewModel(application: Application) : AndroidViewModel(application) {
 
         currentCoroutineContext().ensureActive()
         if (livePing == null) {
+            dao.updateServer(server.copy(failCount = server.failCount + 1))
             _telemetry.update { it.copy(isConnecting = false, isConnected = false, connectingStage = 1) }
             showMessage("${server.countryName} (${server.host}:${server.port}) failed Xray proxy verification")
             return
@@ -673,7 +694,9 @@ class VpnViewModel(application: Application) : AndroidViewModel(application) {
         val updatedServer = server.copy(
             pingMs = livePing,
             resolvedIp = resolvedIp,
-            isSelected = true
+            isSelected = true,
+            lastAliveAt = System.currentTimeMillis(),
+            failCount = 0
         )
         dao.updateServer(updatedServer)
         currentCoroutineContext().ensureActive()
@@ -698,11 +721,10 @@ class VpnViewModel(application: Application) : AndroidViewModel(application) {
         showLoadingScreen: Boolean = false
     ) {
         viewModelScope.launch {
-            val subs = dao.getSubscriptionsOnce()
-            val targetSubUrl = (subs.firstOrNull()?.url?.takeIf { it.isNotBlank() }
-                ?: _settings.value.activeSubscriptionUrl).trim()
+            val subs = dao.getSubscriptionsOnce().filter { it.isEnabled && it.url.isNotBlank() }
+            val fallbackUrls = listOfNotNull(_settings.value.activeSubscriptionUrl.trim().takeIf { it.isNotBlank() })
 
-            if (targetSubUrl.isBlank()) {
+            if (subs.isEmpty() && fallbackUrls.isEmpty()) {
                 val existing = dao.getAllServersOnce()
                 if (existing.isNotEmpty()) {
                     if (showLoadingScreen) {
@@ -721,13 +743,25 @@ class VpnViewModel(application: Application) : AndroidViewModel(application) {
             }
             _fetchingStatusMessage.value = "Fetching your subscription…"
 
-            val subResult = fletcher.fetchSubscriptionAndRankTop15(
-                subscriptionUrl = targetSubUrl,
+            val subResult = fletcher.fetchMultipleSubscriptionsAndRankTop15(
+                subscriptions = subs,
+                fallbackUrls = fallbackUrls,
                 context = getApplication(),
-                settings = _settings.value
-            ) { step ->
-                _fetchingStatusMessage.value = step
-            }
+                settings = _settings.value,
+                onProgress = { step -> _fetchingStatusMessage.value = step },
+                onSubscriptionStats = { sub, ok, count ->
+                    val updatedSub = if (ok) {
+                        sub.copy(
+                            successPulls = sub.successPulls + 1,
+                            lastFetchedAt = System.currentTimeMillis(),
+                            serverCount = count
+                        )
+                    } else {
+                        sub.copy(failedPulls = sub.failedPulls + 1)
+                    }
+                    dao.updateSubscription(updatedSub)
+                }
+            )
 
             subResult.fold(
                 onSuccess = { rankedTop15 ->
@@ -801,14 +835,7 @@ class VpnViewModel(application: Application) : AndroidViewModel(application) {
             return
         }
 
-            if (input.startsWith("vmess://") ||
-            input.startsWith("vless://") ||
-            input.startsWith("trojan://") ||
-            input.startsWith("ss://") ||
-            input.startsWith("hy2://") ||
-            input.startsWith("hysteria2://") ||
-            input.startsWith("{")
-        ) {
+        if (isDirectServerInput(input)) {
             importFromTextOrClipboard(input)
             return
         }
@@ -1211,11 +1238,53 @@ class VpnViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    fun downloadGeoAssets() {
+        viewModelScope.launch {
+            _geoAssetsStatus.value = "Downloading…"
+            val proxyPort = if (_telemetry.value.isConnected && !_settings.value.tunMode) 10808 else null
+            val res = GeoAssetManager.downloadGeoAssets(
+                context = getApplication(),
+                socksProxyPort = proxyPort,
+                onProgress = { step -> _geoAssetsStatus.value = step }
+            )
+            _geoAssetsStatus.value = GeoAssetManager.getGeoAssetsSummary(getApplication())
+            res.fold(
+                onSuccess = {
+                    showMessage("GeoIP & Geosite routing rules installed")
+                },
+                onFailure = { err ->
+                    showMessage("Geo rules download failed: ${err.message ?: "network error"}")
+                }
+            )
+        }
+    }
+
+    private fun isDirectServerInput(input: String): Boolean {
+        val lower = input.trim().lowercase()
+        return lower.startsWith("vmess://") ||
+            lower.startsWith("vless://") ||
+            lower.startsWith("trojan://") ||
+            lower.startsWith("ss://") ||
+            lower.startsWith("hy2://") ||
+            lower.startsWith("hysteria2://") ||
+            lower.startsWith("wireguard://") ||
+            lower.startsWith("socks://") ||
+            lower.startsWith("socks5://") ||
+            lower.startsWith("{")
+    }
+
     fun updateSettings(transform: (AppSettingsState) -> AppSettingsState) {
+        var subAutoUpdateChanged = false
+        var latestSettings = _settings.value
         _settings.update { current ->
             val updated = transform(current)
+            subAutoUpdateChanged = updated.subAutoUpdate != current.subAutoUpdate
+            latestSettings = updated
             prefsStore.saveSettings(updated)
             updated
+        }
+        if (subAutoUpdateChanged) {
+            HollowJobScheduler.schedulePeriodicMaintenance(getApplication(), latestSettings)
         }
     }
 
@@ -1292,7 +1361,8 @@ class VpnViewModel(application: Application) : AndroidViewModel(application) {
             val ctx = getApplication<Application>()
             val currentSettings = _settings.value
             val baseJson = server.rawConfigJson.ifBlank { fletcher.generateXrayJsonForServer(server) }
-            val xrayJson = fletcher.applyRuntimeSettingsToXrayJson(baseJson, currentSettings)
+            val hasGeoAssets = GeoAssetManager.hasGeoAssets(ctx)
+            val xrayJson = fletcher.applyRuntimeSettingsToXrayJson(baseJson, currentSettings, hasGeoAssets)
             val intent = Intent(ctx, XrayVpnService::class.java).apply {
                 action = XrayVpnService.ACTION_CONNECT
                 putExtra(XrayVpnService.EXTRA_SERVER_COUNTRY, server.countryName)
@@ -1310,6 +1380,8 @@ class VpnViewModel(application: Application) : AndroidViewModel(application) {
                     XrayVpnService.EXTRA_SELECTED_APP_PACKAGES,
                     ArrayList(currentSettings.selectedAppPackages)
                 )
+                putExtra(XrayVpnService.EXTRA_SMART_SWITCH_ENABLED, currentSettings.smartSwitchEnabled)
+                putExtra(XrayVpnService.EXTRA_SERVER_SPEED_MBPS, server.lastSpeedMbps)
             }
             if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O) {
                 ctx.startForegroundService(intent)

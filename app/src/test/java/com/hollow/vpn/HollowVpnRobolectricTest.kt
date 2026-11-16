@@ -221,4 +221,106 @@ class HollowVpnRobolectricTest {
         store.saveSettings(store.loadSettings().copy(hasCompletedOnboarding = true))
         assertTrue(store.loadSettings().hasCompletedOnboarding)
     }
+
+    @Test
+    fun `preferences store persists smart switch, mirrors, strict tls, domestic region, and speed baseline`() {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        val store = VpnPreferencesStore(context)
+        val custom = AppSettingsState(
+            smartSwitchEnabled = true,
+            mirrorsEnabled = true,
+            strictTlsEnabled = true,
+            domesticCountryCode = "TR"
+        )
+        store.saveSettings(custom)
+        val loaded = store.loadSettings()
+        assertTrue(loaded.smartSwitchEnabled)
+        assertTrue(loaded.mirrorsEnabled)
+        assertTrue(loaded.strictTlsEnabled)
+        assertEquals("TR", loaded.domesticCountryCode)
+
+        store.saveBaselineSpeed("wifi", 12.5, nowMillis = 1_000_000L)
+        assertEquals(12.5, store.loadBaselineSpeed("wifi", nowMillis = 2_000_000L), 0.1)
+        assertEquals(0.0, store.loadBaselineSpeed("cellular", nowMillis = 2_000_000L), 0.01)
+        store.invalidateBaseline()
+        assertEquals(0.0, store.loadBaselineSpeed("wifi", nowMillis = 2_000_000L), 0.01)
+    }
+
+    @Test
+    fun `smart switch ignores idle traffic, triggers after 8 stalled ticks, and enforces cooldown and hourly cap`() {
+        val switcher = com.hollow.vpn.vpn.SmartSwitch(referenceMbps = 10.0)
+        var t = 1_000_000L
+
+        // Idle traffic (low uplink) must never trigger switch
+        repeat(20) {
+            t += 1_000L
+            assertTrue(switcher.onSample(500L, 0L, t) is com.hollow.vpn.vpn.SmartSwitch.Verdict.Stay)
+        }
+
+        // Active requests with 0 downlink -> triggers on 8th tick
+        for (i in 1..7) {
+            t += 1_000L
+            assertTrue(switcher.onSample(5_000L, 1_000L, t) is com.hollow.vpn.vpn.SmartSwitch.Verdict.Stay)
+        }
+        t += 1_000L
+        val firstVerdict = switcher.onSample(5_000L, 1_000L, t)
+        assertTrue(firstVerdict is com.hollow.vpn.vpn.SmartSwitch.Verdict.Switch)
+
+        // During 45s cooldown, must stay even on stall
+        repeat(10) {
+            t += 1_000L
+            assertTrue(switcher.onSample(5_000L, 0L, t) is com.hollow.vpn.vpn.SmartSwitch.Verdict.Stay)
+        }
+
+        // Consume remaining 3 switches within an hour (spaced past 45s cooldown), then 5th must be blocked
+        repeat(3) {
+            t += 50_000L
+            repeat(7) {
+                t += 1_000L
+                switcher.onSample(5_000L, 100L, t)
+            }
+            t += 1_000L
+            assertTrue(switcher.onSample(5_000L, 100L, t) is com.hollow.vpn.vpn.SmartSwitch.Verdict.Switch)
+        }
+
+        t += 50_000L
+        repeat(10) {
+            t += 1_000L
+            assertTrue(switcher.onSample(5_000L, 100L, t) is com.hollow.vpn.vpn.SmartSwitch.Verdict.Stay)
+        }
+    }
+
+    @Test
+    fun `protocol ranker and security policy enforce DPI tiers and strict TLS rules`() {
+        val parser = V2RayParserAndFletcher()
+        val reality = parser.parseImportPayload("vless://11111111-1111-1111-1111-111111111111@1.1.1.1:443?security=reality&pbk=PK&sni=cf.com#R").first()
+        val hy2 = parser.parseImportPayload("hy2://pass@2.2.2.2:443?insecure=1#H").first()
+        val trojan = parser.parseImportPayload("trojan://pass@3.3.3.3:443?security=tls#T").first()
+        val plainVless = parser.parseImportPayload("vless://11111111-1111-1111-1111-111111111111@4.4.4.4:80?security=none#P").first()
+        val socks = parser.parseImportPayload("socks://5.5.5.5:1080#S").first()
+
+        val ordered = com.hollow.vpn.vpn.ProtocolRanker.prioritizeCandidates(listOf(socks, trojan, hy2, reality))
+        assertEquals(listOf("Reality", "Hysteria2", "Trojan", "SOCKS5"), ordered.map { it.transport })
+
+        assertTrue(com.hollow.vpn.vpn.SecurityPolicy.isServerSecure(reality))
+        assertTrue(com.hollow.vpn.vpn.SecurityPolicy.isServerSecure(trojan))
+        assertFalse(com.hollow.vpn.vpn.SecurityPolicy.isServerSecure(hy2))
+        assertFalse(com.hollow.vpn.vpn.SecurityPolicy.isServerSecure(plainVless))
+        assertFalse(com.hollow.vpn.vpn.SecurityPolicy.isServerSecure(socks))
+    }
+
+    @Test
+    fun `resilient fetcher builds direct-only or github cdn mirror candidates`() {
+        val fetcher = com.hollow.vpn.vpn.ResilientFetcher(okhttp3.OkHttpClient())
+        val githubRaw = "https://raw.githubusercontent.com/user/repo/refs/heads/main/sub.txt"
+
+        val directOnly = fetcher.buildRouteCandidates(githubRaw, mirrorsEnabled = false)
+        assertEquals(1, directOnly.size)
+        assertEquals("direct", directOnly[0].first)
+
+        val withMirrors = fetcher.buildRouteCandidates(githubRaw, mirrorsEnabled = true)
+        assertEquals(3, withMirrors.size)
+        assertEquals("https://cdn.jsdelivr.net/gh/user/repo@main/sub.txt", withMirrors[1].second)
+        assertEquals("https://raw.githack.com/user/repo/main/sub.txt", withMirrors[2].second)
+    }
 }

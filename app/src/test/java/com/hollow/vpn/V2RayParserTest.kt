@@ -275,4 +275,95 @@ class V2RayParserTest {
         assertTrue(selected.any { it.sni == "cdn-one.example.org" })
         assertTrue(selected.any { it.sni == "cdn-two.example.org" })
     }
+
+    @Test
+    fun `parses WireGuard URI and round-trips through parseRawXrayJson`() {
+        val uri = "wireguard://PRIV_KEY_SECRET@198.51.100.10:51820?publickey=PEER_PUB_KEY&address=172.16.0.2/32&mtu=1380&reserved=1,2,3#Germany%20WG"
+        val servers = parser.parseImportPayload(uri)
+        assertEquals(1, servers.size)
+        val server = servers.first()
+        assertEquals("WireGuard (Xray)", server.protocolCore)
+        assertEquals("WireGuard", server.transport)
+        assertEquals(51820, server.port)
+
+        val json = JSONObject(server.rawConfigJson)
+        val proxy = json.getJSONArray("outbounds").getJSONObject(0)
+        assertEquals("wireguard", proxy.getString("protocol"))
+        val wgSettings = proxy.getJSONObject("settings")
+        assertEquals("PRIV_KEY_SECRET", wgSettings.getString("secretKey"))
+        assertEquals(1380, wgSettings.getInt("mtu"))
+        assertEquals("198.51.100.10:51820", wgSettings.getJSONArray("peers").getJSONObject(0).getString("endpoint"))
+        assertEquals("PEER_PUB_KEY", wgSettings.getJSONArray("peers").getJSONObject(0).getString("publicKey"))
+
+        val reparsed = parser.parseRawXrayJson(server.rawConfigJson)
+        assertEquals(1, reparsed.size)
+        assertEquals("WireGuard (Xray)", reparsed.first().protocolCore)
+        assertEquals("PRIV_KEY_SECRET", reparsed.first().uuidOrPassword)
+    }
+
+    @Test
+    fun `parses SOCKS5 URI and VLESS xhttp transport`() {
+        val creds = Base64.encodeToString("alice:wonder".toByteArray(), Base64.NO_WRAP)
+        val socksUri = "socks://$creds@203.0.113.5:1080#Germany%20Socks"
+        val xhttpUri = "vless://11111111-2222-3333-4444-555555555555@nl.example.org:443?security=tls&type=xhttp&host=cdn.nl.example.org&path=%2Fxh#Netherlands%20XHTTP"
+
+        val parsed = parser.parseImportPayload("https://example.com/ignore-me\n$socksUri\n$xhttpUri")
+        assertEquals(2, parsed.size)
+
+        val socks = parsed[0]
+        assertEquals("SOCKS5 (Xray)", socks.protocolCore)
+        assertEquals(1080, socks.port)
+        val socksOutbound = JSONObject(socks.rawConfigJson).getJSONArray("outbounds").getJSONObject(0)
+        assertEquals("socks", socksOutbound.getString("protocol"))
+        val socksUser = socksOutbound.getJSONObject("settings").getJSONArray("servers").getJSONObject(0)
+            .getJSONArray("users").getJSONObject(0)
+        assertEquals("alice", socksUser.getString("user"))
+        assertEquals("wonder", socksUser.getString("pass"))
+
+        val xhttp = parsed[1]
+        assertEquals("XHTTP", xhttp.transport)
+        val xhttpStream = JSONObject(xhttp.rawConfigJson).getJSONArray("outbounds").getJSONObject(0)
+            .getJSONObject("streamSettings")
+        assertEquals("xhttp", xhttpStream.getString("network"))
+        assertEquals("/xh", xhttpStream.getJSONObject("xhttpSettings").getString("path"))
+    }
+
+    @Test
+    fun `applyRuntimeSettingsToXrayJson emits geoip and geosite rules when geo assets exist`() {
+        val uri = "vless://11111111-2222-3333-4444-555555555555@de.example.com:443?security=tls&type=tcp#Germany"
+        val baseJson = parser.parseImportPayload(uri).first().rawConfigJson
+
+        val irRuntime = JSONObject(
+            parser.applyRuntimeSettingsToXrayJson(
+                baseJson = baseJson,
+                settings = AppSettingsState(routingMode = "Bypass LAN & Domestic", domesticCountryCode = "IR"),
+                hasGeoAssets = true
+            )
+        )
+        val routing = irRuntime.getJSONObject("routing")
+        assertEquals("IPIfNonMatch", routing.getString("domainStrategy"))
+        val rules = routing.getJSONArray("rules")
+        val ipList = (0 until rules.getJSONObject(0).getJSONArray("ip").length()).map {
+            rules.getJSONObject(0).getJSONArray("ip").getString(it)
+        }
+        assertTrue(ipList.contains("geoip:private"))
+        assertTrue(ipList.contains("geoip:ir"))
+
+        val domainList = (0 until rules.getJSONObject(1).getJSONArray("domain").length()).map {
+            rules.getJSONObject(1).getJSONArray("domain").getString(it)
+        }
+        assertTrue(domainList.contains("geosite:private"))
+        assertTrue(domainList.contains("geosite:category-ir"))
+
+        val cnRuntime = JSONObject(
+            parser.applyRuntimeSettingsToXrayJson(
+                baseJson = baseJson,
+                settings = AppSettingsState(routingMode = "Bypass LAN & Domestic", domesticCountryCode = "CN"),
+                hasGeoAssets = true
+            )
+        )
+        val cnDomains = cnRuntime.getJSONObject("routing").getJSONArray("rules").getJSONObject(1).getJSONArray("domain")
+        val cnDomainList = (0 until cnDomains.length()).map { cnDomains.getString(it) }
+        assertTrue(cnDomainList.contains("geosite:cn"))
+    }
 }

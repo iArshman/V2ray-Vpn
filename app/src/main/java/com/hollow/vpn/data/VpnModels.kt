@@ -35,7 +35,11 @@ data class ServerEntity(
     val isSelected: Boolean = false,
     val isCustom: Boolean = false,
     val subscriptionUrl: String = "",
-    val createdAt: Long = System.currentTimeMillis()
+    val createdAt: Long = System.currentTimeMillis(),
+    val lastSpeedMbps: Double = 0.0,
+    val lastAliveAt: Long = 0L,
+    val protocolTier: Int = 5,
+    val failCount: Int = 0
 )
 
 @Entity(tableName = "vpn_subscriptions")
@@ -47,7 +51,10 @@ data class SubscriptionEntity(
     val updateIntervalHours: Int = 1,
     val replaceExisting: Boolean = true,
     val lastFetchedAt: Long = System.currentTimeMillis(),
-    val serverCount: Int = 0
+    val serverCount: Int = 0,
+    val isEnabled: Boolean = true,
+    val successPulls: Int = 0,
+    val failedPulls: Int = 0
 )
 
 enum class ServerFilter(val label: String) {
@@ -74,7 +81,11 @@ data class AppSettingsState(
     val perAppProxyEnabled: Boolean = false,
     val bypassSelectedApps: Boolean = false,
     val selectedAppPackages: Set<String> = emptySet(),
-    val hasCompletedOnboarding: Boolean = false
+    val hasCompletedOnboarding: Boolean = false,
+    val smartSwitchEnabled: Boolean = false,
+    val mirrorsEnabled: Boolean = false,
+    val strictTlsEnabled: Boolean = false,
+    val domesticCountryCode: String = "IR"
 ) {
     companion object {
         const val DEFAULT_SUBSCRIPTION_URL = ""
@@ -95,7 +106,9 @@ data class ActiveTunnelSnapshot(
     val routingMode: String,
     val perAppProxyEnabled: Boolean,
     val bypassSelectedApps: Boolean,
-    val selectedAppPackages: Set<String>
+    val selectedAppPackages: Set<String>,
+    val smartSwitchEnabled: Boolean = false,
+    val serverSpeedMbps: Double = 0.0
 )
 
 class VpnPreferencesStore(context: Context) {
@@ -121,7 +134,11 @@ class VpnPreferencesStore(context: Context) {
             perAppProxyEnabled = prefs.getBoolean("per_app_proxy", false),
             bypassSelectedApps = prefs.getBoolean("bypass_selected_apps", false),
             selectedAppPackages = prefs.getStringSet("per_app_packages", emptySet()) ?: emptySet(),
-            hasCompletedOnboarding = prefs.getBoolean("has_completed_onboarding", false)
+            hasCompletedOnboarding = prefs.getBoolean("has_completed_onboarding", false),
+            smartSwitchEnabled = prefs.getBoolean("smart_switch_enabled", false),
+            mirrorsEnabled = prefs.getBoolean("mirrors_enabled", false),
+            strictTlsEnabled = prefs.getBoolean("strict_tls_enabled", false),
+            domesticCountryCode = prefs.getString("domestic_country_code", "IR") ?: "IR"
         )
     }
 
@@ -144,6 +161,10 @@ class VpnPreferencesStore(context: Context) {
             .putBoolean("bypass_selected_apps", state.bypassSelectedApps)
             .putStringSet("per_app_packages", state.selectedAppPackages)
             .putBoolean("has_completed_onboarding", state.hasCompletedOnboarding)
+            .putBoolean("smart_switch_enabled", state.smartSwitchEnabled)
+            .putBoolean("mirrors_enabled", state.mirrorsEnabled)
+            .putBoolean("strict_tls_enabled", state.strictTlsEnabled)
+            .putString("domestic_country_code", state.domesticCountryCode)
             .apply()
     }
 
@@ -161,6 +182,8 @@ class VpnPreferencesStore(context: Context) {
             .putBoolean("snap_per_app", snapshot.perAppProxyEnabled)
             .putBoolean("snap_bypass_selected", snapshot.bypassSelectedApps)
             .putStringSet("snap_selected_packages", snapshot.selectedAppPackages)
+            .putBoolean("snap_smart_switch", snapshot.smartSwitchEnabled)
+            .putFloat("snap_server_speed_mbps", snapshot.serverSpeedMbps.toFloat())
             .apply()
     }
 
@@ -180,7 +203,9 @@ class VpnPreferencesStore(context: Context) {
             routingMode = prefs.getString("snap_routing_mode", "Global") ?: "Global",
             perAppProxyEnabled = prefs.getBoolean("snap_per_app", false),
             bypassSelectedApps = prefs.getBoolean("snap_bypass_selected", false),
-            selectedAppPackages = prefs.getStringSet("snap_selected_packages", emptySet()) ?: emptySet()
+            selectedAppPackages = prefs.getStringSet("snap_selected_packages", emptySet()) ?: emptySet(),
+            smartSwitchEnabled = prefs.getBoolean("snap_smart_switch", false),
+            serverSpeedMbps = prefs.getFloat("snap_server_speed_mbps", 0f).toDouble()
         )
     }
 
@@ -193,6 +218,35 @@ class VpnPreferencesStore(context: Context) {
             .remove("snap_xray_json")
             .apply()
     }
+
+    fun saveBaselineSpeed(networkKey: String, mbps: Double, nowMillis: Long = System.currentTimeMillis()) {
+        prefs.edit()
+            .putString("baseline_network_key", networkKey)
+            .putFloat("baseline_mbps", mbps.toFloat())
+            .putLong("baseline_updated_at", nowMillis)
+            .apply()
+    }
+
+    fun loadBaselineSpeed(networkKey: String, maxAgeMillis: Long = 6L * 60 * 60 * 1000, nowMillis: Long = System.currentTimeMillis()): Double {
+        val savedKey = prefs.getString("baseline_network_key", "").orEmpty()
+        val updatedAt = prefs.getLong("baseline_updated_at", 0L)
+        if (savedKey != networkKey || updatedAt <= 0L || nowMillis - updatedAt > maxAgeMillis) return 0.0
+        return prefs.getFloat("baseline_mbps", 0f).toDouble()
+    }
+
+    fun invalidateBaseline() {
+        prefs.edit()
+            .remove("baseline_network_key")
+            .remove("baseline_mbps")
+            .remove("baseline_updated_at")
+            .apply()
+    }
+
+    fun saveLastHealthPulseMillis(nowMillis: Long = System.currentTimeMillis()) {
+        prefs.edit().putLong("last_health_pulse_at", nowMillis).apply()
+    }
+
+    fun loadLastHealthPulseMillis(): Long = prefs.getLong("last_health_pulse_at", 0L)
 }
 
 @Dao
@@ -239,6 +293,9 @@ interface VpnDao {
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insertSubscription(subscription: SubscriptionEntity): Long
 
+    @Update
+    suspend fun updateSubscription(subscription: SubscriptionEntity)
+
     @Query("DELETE FROM vpn_subscriptions WHERE url = :url")
     suspend fun deleteSubscriptionByUrl(url: String)
 
@@ -248,7 +305,7 @@ interface VpnDao {
 
 @Database(
     entities = [ServerEntity::class, SubscriptionEntity::class],
-    version = 6,
+    version = 7,
     exportSchema = false
 )
 abstract class VpnDatabase : RoomDatabase() {

@@ -30,6 +30,7 @@ import java.util.Locale
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
+import com.hollow.vpn.data.SubscriptionEntity
 import kotlin.math.abs
 import kotlin.system.measureTimeMillis
 
@@ -41,9 +42,9 @@ sealed class XrayProbeResult {
 
 /**
  * Production V2Ray / Xray multi-protocol parser and Fletcher Auto-Fetcher.
- * Fetches live subscriptions, samples across the entire server pool (preventing Cloudflare US
- * anycast dominance), runs parallel TCP socket + real Xray outbound delay verification,
- * resolves real IPs + batch GeoIP countries, and curates a country-diverse Top 15 fastest list.
+ * Uses ResilientFetcher (direct -> optional CDN mirrors -> disk cache), Beta source scoring,
+ * TCP reachability filtering (drop-only, never ranked), DPI-resilient protocol tier ranking,
+ * real Xray delay + serialized single-stream throughput probing, and HTTPS-only GeoIP enrichment.
  */
 class V2RayParserAndFletcher {
 
@@ -58,6 +59,8 @@ class V2RayParserAndFletcher {
         .readTimeout(5, TimeUnit.SECONDS)
         .build()
 
+    private val resilientFetcher = ResilientFetcher(httpClient)
+
     @Volatile
     private var coreEnvInitialized = false
 
@@ -69,11 +72,6 @@ class V2RayParserAndFletcher {
         }
     }
 
-    /**
-     * Fetches a user-provided V2Ray/Xray subscription URL, decodes all discovered nodes,
-     * samples diverse hosts across the entire list, runs concurrent TCP + real Xray handshake probes,
-     * resolves batch GeoIP Country Name/Flag, and returns a country-diverse Top 15 fastest server list.
-     */
     suspend fun fetchSubscriptionAndRankTop15(
         subscriptionUrl: String,
         context: Context? = null,
@@ -86,21 +84,22 @@ class V2RayParserAndFletcher {
                 "Subscription link must start with https:// or http://"
             }
             onProgress("Downloading live subscription feed…")
-            val request = Request.Builder()
-                .url(cleanUrl)
-                .header("User-Agent", "v2rayNG/1.8.19 Xray/1.8.11 Mozilla/5.0")
-                .build()
-
-            val bodyText = httpClient.newCall(request).execute().use { response ->
-                if (!response.isSuccessful) {
-                    throw IllegalStateException("Subscription server returned HTTP ${response.code}")
-                }
-                response.body?.string().orEmpty()
+            val fetchOutcome = resilientFetcher.fetchSubscriptionText(
+                url = cleanUrl,
+                context = context,
+                mirrorsEnabled = settings.mirrorsEnabled
+            ).getOrElse { err ->
+                return@withContext Result.failure(err)
             }
 
-            onProgress("Optimizing available locations…")
+            if (fetchOutcome.fromCache) {
+                onProgress("Using cached subscription list…")
+            } else {
+                onProgress("Optimizing available locations (${fetchOutcome.routeLabel})…")
+            }
+
             val parsedNodes = parseImportPayload(
-                rawInput = bodyText,
+                rawInput = fetchOutcome.body,
                 subscriptionUrl = cleanUrl,
                 isCustom = false
             )
@@ -110,10 +109,7 @@ class V2RayParserAndFletcher {
                 )
             }
 
-            // Instead of taking only the first 140 lines from the top of the file (which in EbraSha
-            // are often all Cloudflare US Anycast IPs), group by /16 IP prefix & domain and sample
-            // evenly across the entire list, prioritizing non-Cloudflare dedicated servers first!
-            val diverseCandidates = selectDiverseCandidatePool(parsedNodes, maxCandidates = 150)
+            val diverseCandidates = selectDiverseCandidatePool(parsedNodes, maxCandidates = 200)
 
             onProgress("Testing ${diverseCandidates.size} global servers…")
             val rankedTop15 = benchmarkAndRankTop15(
@@ -131,6 +127,89 @@ class V2RayParserAndFletcher {
                 )
             }
 
+            Result.success(rankedTop15)
+        } catch (e: Exception) {
+            Result.failure(e)
+        }
+    }
+
+    suspend fun fetchMultipleSubscriptionsAndRankTop15(
+        subscriptions: List<SubscriptionEntity>,
+        fallbackUrls: List<String> = emptyList(),
+        context: Context? = null,
+        settings: AppSettingsState = AppSettingsState(),
+        onProgress: (String) -> Unit = {},
+        onSubscriptionStats: suspend (SubscriptionEntity, Boolean, Int) -> Unit = { _, _, _ -> }
+    ): Result<List<ServerEntity>> = withContext(Dispatchers.IO) {
+        try {
+            val orderedSubs = BetaSourceScorer.orderSources(subscriptions).take(8)
+            val aggregated = mutableListOf<ServerEntity>()
+            var lastError: Throwable? = null
+
+            if (orderedSubs.isNotEmpty()) {
+                for ((idx, sub) in orderedSubs.withIndex()) {
+                    onProgress("Fetching feed ${idx + 1}/${orderedSubs.size}…")
+                    val outcome = resilientFetcher.fetchSubscriptionText(
+                        url = sub.url,
+                        context = context,
+                        mirrorsEnabled = settings.mirrorsEnabled
+                    )
+                    outcome.fold(
+                        onSuccess = { fetched ->
+                            val parsed = parseImportPayload(
+                                rawInput = fetched.body,
+                                subscriptionUrl = sub.url,
+                                isCustom = false
+                            )
+                            aggregated += parsed
+                            onSubscriptionStats(sub, parsed.isNotEmpty(), parsed.size)
+                        },
+                        onFailure = { err ->
+                            lastError = err
+                            onSubscriptionStats(sub, false, 0)
+                        }
+                    )
+                }
+            } else {
+                for (url in fallbackUrls.distinct().take(8)) {
+                    onProgress("Downloading subscription feed…")
+                    val outcome = resilientFetcher.fetchSubscriptionText(
+                        url = url,
+                        context = context,
+                        mirrorsEnabled = settings.mirrorsEnabled
+                    )
+                    outcome.fold(
+                        onSuccess = { fetched ->
+                            aggregated += parseImportPayload(
+                                rawInput = fetched.body,
+                                subscriptionUrl = url,
+                                isCustom = false
+                            )
+                        },
+                        onFailure = { err -> lastError = err }
+                    )
+                }
+            }
+
+            if (aggregated.isEmpty()) {
+                return@withContext Result.failure(
+                    lastError ?: IllegalArgumentException("No valid server nodes found in configured subscriptions.")
+                )
+            }
+
+            val diverseCandidates = selectDiverseCandidatePool(aggregated, maxCandidates = 240)
+            onProgress("Testing ${diverseCandidates.size} candidate servers…")
+            val rankedTop15 = benchmarkAndRankTop15(
+                servers = diverseCandidates,
+                context = context,
+                settings = settings,
+                onProgress = onProgress
+            )
+            if (rankedTop15.isEmpty()) {
+                return@withContext Result.failure(
+                    IllegalStateException("Tested ${diverseCandidates.size} nodes, but none passed proxy verification.")
+                )
+            }
             Result.success(rankedTop15)
         } catch (e: Exception) {
             Result.failure(e)
@@ -213,9 +292,13 @@ class V2RayParserAndFletcher {
     }
 
     /**
-     * Benchmarks candidate servers concurrently using TCP pre-filtering and real Xray outbound
-     * 204 delay verification (`Libv2ray.measureOutboundDelay`), resolves real IPs & GeoIP countries,
-     * and selects a country-diverse Top 15 leaderboard sorted by lowest real latency!
+     * Benchmarks candidate servers:
+     * 1. Measures user's line baseline (if needed) under TCP reachability probing.
+     * 2. Uses TCP ping strictly to DROP unreachable nodes (never to rank, avoiding CDN edge bias).
+     * 3. Orders survivors by DPI-resilient protocol tier (shuffled within tier) & optional strict TLS.
+     * 4. Verifies live Xray outbound HTTP 204 delay (`Libv2ray.measureOutboundDelay`).
+     * 5. Runs serialized one-at-a-time throughput verification on top candidates so winners are truly fast.
+     * 6. Resolves real IPs + HTTPS-only GeoIP country flags, returning a country-diverse Top 15.
      */
     suspend fun benchmarkAndRankTop15(
         servers: List<ServerEntity>,
@@ -225,15 +308,27 @@ class V2RayParserAndFletcher {
     ): List<ServerEntity> = withContext(Dispatchers.IO) {
         if (servers.isEmpty()) return@withContext emptyList()
 
-        val (udpHysteriaNodes, tcpNodes) = servers.partition {
-            it.protocolCore.contains("Hysteria", ignoreCase = true)
+        val securityFiltered = if (settings.strictTlsEnabled) {
+            servers.filter { SecurityPolicy.isServerSecure(it) }.ifEmpty { servers }
+        } else {
+            servers
         }
+
+        val (udpNodes, tcpNodes) = securityFiltered.partition {
+            it.protocolCore.contains("Hysteria", ignoreCase = true) ||
+                it.protocolCore.contains("WireGuard", ignoreCase = true)
+        }
+
+        val baselineJob = if (context != null) {
+            async { ThroughputProbe.measureOrLoadBaselineMbps(context) }
+        } else null
 
         val semaphore = Semaphore(40)
         val completedCounter = AtomicInteger(0)
         val liveCounter = AtomicInteger(0)
         val totalTcp = tcpNodes.size
 
+        // TCP reachability DROPS dead nodes only — never sorts by TCP RTT.
         val tcpSurvivors = coroutineScope {
             tcpNodes.map { server ->
                 async {
@@ -247,36 +342,40 @@ class V2RayParserAndFletcher {
                         if (livePing != null) {
                             val alive = liveCounter.incrementAndGet()
                             if (done % 10 == 0 || done == totalTcp) {
-                                onProgress("TCP probed $done/$totalTcp · $alive online…")
+                                onProgress("Probed $done/$totalTcp · $alive reachable…")
                             }
                             server.copy(pingMs = livePing)
                         } else {
                             if (done % 10 == 0 || done == totalTcp) {
-                                onProgress("TCP probed $done/$totalTcp · ${liveCounter.get()} online…")
+                                onProgress("Probed $done/$totalTcp · ${liveCounter.get()} reachable…")
                             }
                             null
                         }
                     }
                 }
             }.awaitAll()
-        }.filterNotNull().sortedBy { it.pingMs }
+        }.filterNotNull()
 
-        val verificationPool = (tcpSurvivors.take(40) + udpHysteriaNodes.take(10))
-            .distinctBy {
+        val baselineMbps = baselineJob?.await() ?: 0.0
+
+        val prioritizedPool = ProtocolRanker.prioritizeCandidates(
+            (tcpSurvivors + udpNodes).distinctBy {
                 "${it.protocolCore.lowercase()}:${it.host.lowercase()}:${it.port}:${it.uuidOrPassword}:${it.sni.lowercase()}"
             }
+        ).take(60)
 
-        if (verificationPool.isEmpty()) return@withContext emptyList()
+        if (prioritizedPool.isEmpty()) return@withContext emptyList()
 
-        val fastestPool = if (context != null) {
-            onProgress("Verifying Xray handshake for ${verificationPool.size} fast servers…")
+        val now = System.currentTimeMillis()
+        val verifiedPool = if (context != null) {
+            onProgress("Verifying Xray handshake for ${prioritizedPool.size} candidates…")
             val xraySem = Semaphore(10)
             val xrayDone = AtomicInteger(0)
             val xrayOk = AtomicInteger(0)
             val nativeMissing = AtomicBoolean(false)
 
             val verified = coroutineScope {
-                verificationPool.map { server ->
+                prioritizedPool.map { server ->
                     async {
                         xraySem.withPermit {
                             if (nativeMissing.get()) {
@@ -287,18 +386,18 @@ class V2RayParserAndFletcher {
                             when (result) {
                                 is XrayProbeResult.Success -> {
                                     val ok = xrayOk.incrementAndGet()
-                                    if (done % 5 == 0 || done == verificationPool.size) {
-                                        onProgress("Verified $done/${verificationPool.size} · $ok working…")
+                                    if (done % 5 == 0 || done == prioritizedPool.size) {
+                                        onProgress("Verified $done/${prioritizedPool.size} · $ok working…")
                                     }
-                                    server.copy(pingMs = result.delayMs)
+                                    server.copy(pingMs = result.delayMs, lastAliveAt = now, failCount = 0)
                                 }
                                 XrayProbeResult.NativeUnavailable -> {
                                     nativeMissing.set(true)
-                                    if (server.pingMs > 0) server else null
+                                    if (server.pingMs > 0) server.copy(lastAliveAt = now) else null
                                 }
                                 XrayProbeResult.Unreachable -> {
-                                    if (done % 5 == 0 || done == verificationPool.size) {
-                                        onProgress("Verified $done/${verificationPool.size} · ${xrayOk.get()} working…")
+                                    if (done % 5 == 0 || done == prioritizedPool.size) {
+                                        onProgress("Verified $done/${prioritizedPool.size} · ${xrayOk.get()} working…")
                                     }
                                     null
                                 }
@@ -306,40 +405,63 @@ class V2RayParserAndFletcher {
                         }
                     }
                 }.awaitAll()
-            }.filterNotNull().sortedBy { it.pingMs }.take(45)
+            }.filterNotNull().sortedWith(
+                compareBy<ServerEntity> { it.protocolTier }.thenBy { it.pingMs }
+            ).take(45)
 
-            verified
+            if (verified.isNotEmpty() && !nativeMissing.get()) {
+                val speedTargetCount = verified.size.coerceAtMost(5)
+                onProgress("Measuring throughput (1 at a time) for top $speedTargetCount…")
+                val measured = mutableListOf<ServerEntity>()
+                val acceptTargetMbps = if (baselineMbps > 0.0) {
+                    baselineMbps * ThroughputProbe.ACCEPT_BASELINE_FRACTION
+                } else {
+                    0.0
+                }
+                for ((idx, candidate) in verified.take(speedTargetCount).withIndex()) {
+                    onProgress("Speed testing ${idx + 1}/$speedTargetCount (${candidate.countryName})…")
+                    val speed = ThroughputProbe.measureServerThroughputMbps(
+                        context = context,
+                        server = candidate,
+                        parser = this@V2RayParserAndFletcher,
+                        settings = settings
+                    )
+                    val updated = candidate.copy(lastSpeedMbps = speed, lastAliveAt = now)
+                    measured += updated
+                    if (acceptTargetMbps > 0.0 && speed >= acceptTargetMbps && measured.size >= 3) {
+                        break
+                    }
+                }
+                val measuredIds = measured.map { "${it.host}:${it.port}:${it.uuidOrPassword}" }.toSet()
+                val rest = verified.filterNot { "${it.host}:${it.port}:${it.uuidOrPassword}" in measuredIds }
+                (measured + rest).sortedWith(
+                    compareByDescending<ServerEntity> { it.lastSpeedMbps }
+                        .thenBy { it.protocolTier }
+                        .thenBy { it.pingMs }
+                )
+            } else {
+                verified
+            }
         } else {
-            tcpSurvivors.take(45)
+            prioritizedPool.take(45)
         }
 
-        if (fastestPool.isEmpty()) return@withContext emptyList()
+        if (verifiedPool.isEmpty()) return@withContext emptyList()
 
-        onProgress("Resolving Country Flags & IPs for ${fastestPool.size} fast servers…")
+        onProgress("Resolving Country Flags & IPs for ${verifiedPool.size} servers…")
 
-        // 1. Resolve real IPv4 addresses in parallel
         val withResolvedIps = coroutineScope {
-            fastestPool.map { server ->
+            verifiedPool.map { server ->
                 async {
-                    val lookupHost = if (isCloudflareAnycastHost(server.host) &&
-                        server.sni.isNotBlank() &&
-                        !isCloudflareAnycastHost(server.sni)
-                    ) {
-                        // Resolve both the connection IP and check SNI for origin country hint
-                        resolveServerIpAddress(server.host)
-                    } else {
-                        resolveServerIpAddress(server.host)
-                    }
+                    val lookupHost = resolveServerIpAddress(server.host)
                     server.copy(resolvedIp = lookupHost)
                 }
             }.awaitAll()
         }
 
-        // 2. Single batch GeoIP lookup via ip-api.com/batch for all resolved IPs at once
         val ipList = withResolvedIps.map { it.resolvedIp }.distinct()
         val batchGeoMap = fetchBatchGeoIpMap(ipList)
 
-        // 3. Apply Real GeoIP Country Name, Country Code, and IP to each candidate
         val enrichedCandidates = withResolvedIps.map { server ->
             val explicitCode = server.countryCode.takeIf { it.length == 2 && it != "XX" }
             val geoResult = batchGeoMap[server.resolvedIp]
@@ -359,12 +481,21 @@ class V2RayParserAndFletcher {
             )
         }
 
-        // 4. Curate Country-Diverse Top 15 fastest servers:
         val groupedByCountry = enrichedCandidates
             .groupBy { it.countryCode }
             .values
-            .map { group -> group.sortedBy { it.pingMs } }
-            .sortedBy { group -> group.first().pingMs }
+            .map { group ->
+                group.sortedWith(
+                    compareByDescending<ServerEntity> { it.lastSpeedMbps }
+                        .thenBy { it.protocolTier }
+                        .thenBy { if (it.pingMs > 0) it.pingMs else Int.MAX_VALUE }
+                )
+            }
+            .sortedWith(
+                compareByDescending<List<ServerEntity>> { it.first().lastSpeedMbps }
+                    .thenBy { it.first().protocolTier }
+                    .thenBy { if (it.first().pingMs > 0) it.first().pingMs else Int.MAX_VALUE }
+            )
 
         val diverseTop15 = mutableListOf<ServerEntity>()
         var tier = 0
@@ -382,7 +513,11 @@ class V2RayParserAndFletcher {
         }
 
         diverseTop15
-            .sortedBy { it.pingMs }
+            .sortedWith(
+                compareByDescending<ServerEntity> { it.lastSpeedMbps }
+                    .thenBy { it.protocolTier }
+                    .thenBy { if (it.pingMs > 0) it.pingMs else Int.MAX_VALUE }
+            )
             .mapIndexed { index, item ->
                 item.copy(
                     isRecommendedTop15 = true,
@@ -470,27 +605,6 @@ class V2RayParserAndFletcher {
         } catch (_: Exception) {
         }
 
-        // 4. Legacy fallback: ip-api.com
-        try {
-            val req = Request.Builder()
-                .url("http://ip-api.com/json/?fields=status,country,countryCode,query")
-                .build()
-            client.newCall(req).execute().use { resp ->
-                if (resp.isSuccessful) {
-                    val json = JSONObject(resp.body?.string().orEmpty())
-                    if (json.optString("status") == "success") {
-                        val ip = json.optString("query", "")
-                        val country = json.optString("country", "")
-                        val code = json.optString("countryCode", "").uppercase()
-                        if (ip.isNotBlank() && code.length == 2) {
-                            return@withContext Triple(ip, country.ifBlank { countryNameFromIsoCode(code) }, code)
-                        }
-                    }
-                }
-            }
-        } catch (_: Exception) {
-        }
-
         Triple("Unavailable", "Unknown", "XX")
     }
 
@@ -523,44 +637,20 @@ class V2RayParserAndFletcher {
     }
 
     /**
-     * Queries `http://ip-api.com/batch` in a single HTTP POST request for up to 100 IPs,
-     * returning `Map<IP, Pair<CountryName, CountryCode>>`.
+     * Resolves country codes for a list of IPv4 addresses strictly over HTTPS (`ipwho.is` / `api.ip.sb`),
+     * avoiding cleartext HTTP GeoIP calls.
      */
-    private fun fetchBatchGeoIpMap(ips: List<String>): Map<String, Pair<String, String>> {
-        val validIps = ips.filter { it.isNotBlank() && it.contains(".") }.take(95)
-        if (validIps.isEmpty()) return emptyMap()
-        return try {
-            val jsonArray = JSONArray()
-            validIps.forEach { jsonArray.put(it) }
-            val requestBody = jsonArray.toString()
-                .toRequestBody("application/json; charset=utf-8".toMediaType())
-
-            val request = Request.Builder()
-                .url("http://ip-api.com/batch?fields=status,country,countryCode,query")
-                .post(requestBody)
-                .build()
-
-            geoHttpClient.newCall(request).execute().use { response ->
-                if (!response.isSuccessful) return emptyMap()
-                val body = response.body?.string().orEmpty()
-                val arr = JSONArray(body)
-                val map = mutableMapOf<String, Pair<String, String>>()
-                for (i in 0 until arr.length()) {
-                    val obj = arr.optJSONObject(i) ?: continue
-                    if (obj.optString("status") == "success") {
-                        val queryIp = obj.optString("query")
-                        val code = obj.optString("countryCode").uppercase().trim()
-                        val country = obj.optString("country").trim()
-                        if (queryIp.isNotBlank() && code.length == 2) {
-                            map[queryIp] = (country.ifBlank { countryNameFromIsoCode(code) }) to code
-                        }
-                    }
+    private suspend fun fetchBatchGeoIpMap(ips: List<String>): Map<String, Pair<String, String>> = coroutineScope {
+        val validIps = ips.filter { it.isNotBlank() && it.contains(".") }.distinct().take(45)
+        if (validIps.isEmpty()) return@coroutineScope emptyMap()
+        val sem = Semaphore(8)
+        validIps.map { ip ->
+            async(Dispatchers.IO) {
+                sem.withPermit {
+                    lookupSingleGeoCountryForIp(ip)?.let { ip to it }
                 }
-                map
             }
-        } catch (_: Exception) {
-            emptyMap()
-        }
+        }.awaitAll().filterNotNull().toMap()
     }
 
     private fun lookupSingleGeoCountryForIp(ip: String): Pair<String, String>? {
@@ -764,7 +854,13 @@ class V2RayParserAndFletcher {
         val results = mutableListOf<ServerEntity>()
         decodedText.lineSequence()
             .map { it.trim() }
-            .filter { it.isNotEmpty() && !it.startsWith("#") && !it.startsWith("//") }
+            .filter {
+                it.isNotEmpty() &&
+                    !it.startsWith("#") &&
+                    !it.startsWith("//") &&
+                    !it.startsWith("http://", ignoreCase = true) &&
+                    !it.startsWith("https://", ignoreCase = true)
+            }
             .forEach { line ->
                 parseSingleUriLine(line, subscriptionUrl, isCustom)?.let { results.add(it) }
             }
@@ -786,6 +882,9 @@ class V2RayParserAndFletcher {
             lower.startsWith("ss://") -> parseShadowsocksUri(clean, subscriptionUrl, isCustom)
             lower.startsWith("hy2://") || lower.startsWith("hysteria2://") ->
                 parseHysteria2Uri(clean, subscriptionUrl, isCustom)
+            lower.startsWith("wireguard://") -> parseWireGuardUri(clean, subscriptionUrl, isCustom)
+            lower.startsWith("socks://") || lower.startsWith("socks5://") ->
+                parseSocksUri(clean, subscriptionUrl, isCustom)
             // TUIC outbounds are not supported by Xray-core / AndroidLibXrayLite.
             lower.startsWith("tuic://") -> null
             else -> null
@@ -1009,6 +1108,7 @@ class V2RayParserAndFletcher {
             val normalizedNetwork = when (rawType) {
                 "ws", "websocket" -> "ws"
                 "httpupgrade" -> "httpupgrade"
+                "xhttp", "splithttp" -> "xhttp"
                 "grpc" -> "grpc"
                 "h2", "http" -> "h2"
                 else -> "tcp"
@@ -1023,6 +1123,7 @@ class V2RayParserAndFletcher {
 
             val transportLabel = when {
                 resolvedSecurity == "reality" -> "Reality"
+                normalizedNetwork == "xhttp" -> "XHTTP"
                 normalizedNetwork == "grpc" -> "gRPC"
                 normalizedNetwork == "ws" || normalizedNetwork == "httpupgrade" -> "WebSocket"
                 normalizedNetwork == "h2" -> "HTTP/2"
@@ -1116,6 +1217,173 @@ class V2RayParserAndFletcher {
         }
     }
 
+    private fun parseWireGuardUri(
+        uriLine: String,
+        subscriptionUrl: String,
+        isCustom: Boolean
+    ): ServerEntity? {
+        return try {
+            val withoutScheme = uriLine.substringAfter("://")
+            val remark = if (withoutScheme.contains("#")) {
+                safeUrlDecode(withoutScheme.substringAfterLast("#"))
+            } else ""
+            val beforeFragment = withoutScheme.substringBefore("#")
+            val rawQuery = if (beforeFragment.contains("?")) beforeFragment.substringAfter("?") else ""
+            val authority = beforeFragment.substringBefore("?")
+            if (!authority.contains("@")) return null
+
+            val secretKey = safeUrlDecode(authority.substringBeforeLast("@")).trim()
+            if (secretKey.isBlank()) return null
+            val hostPort = authority.substringAfterLast("@").trim()
+            val (host, port) = extractHostAndPort(hostPort, defaultPort = 51820)
+            if (host.isBlank() || host.contains(" ")) return null
+
+            val query = parseQueryParams(rawQuery)
+            val peerPublicKey = query["publickey"].orEmpty().trim()
+            if (peerPublicKey.isBlank()) return null
+            val localAddresses = (query["address"] ?: "172.16.0.2/32")
+                .split(",")
+                .map { it.trim() }
+                .filter { it.isNotEmpty() }
+            val mtu = query["mtu"]?.toIntOrNull()?.coerceIn(1200, 1500) ?: 1420
+            val reserved = query["reserved"].orEmpty()
+                .split(",")
+                .mapNotNull { it.trim().toIntOrNull() }
+
+            val (countryName, countryCode) = inferCountryFromRemarkOrHost(remark, host)
+            val entity = ServerEntity(
+                countryName = countryName,
+                countryCode = countryCode,
+                protocolDisplay = "V2Ray · WireGuard · $host",
+                protocolCore = "WireGuard (Xray)",
+                transport = "WireGuard",
+                host = host,
+                resolvedIp = host,
+                port = port,
+                uuidOrPassword = secretKey,
+                publicKey = peerPublicKey,
+                shareUri = uriLine,
+                pingMs = 0,
+                protocolTier = 5,
+                isCustom = isCustom,
+                subscriptionUrl = subscriptionUrl
+            )
+
+            val peerObj = JSONObject()
+                .put("endpoint", "$host:$port")
+                .put("publicKey", peerPublicKey)
+            val wgSettings = JSONObject()
+                .put("secretKey", secretKey)
+                .put("address", JSONArray(localAddresses))
+                .put("peers", JSONArray().put(peerObj))
+                .put("mtu", mtu)
+            if (reserved.size == 3) {
+                wgSettings.put("reserved", JSONArray(reserved))
+            }
+
+            val root = JSONObject()
+                .put("log", JSONObject().put("loglevel", "warning"))
+                .put(
+                    "inbounds",
+                    JSONArray().put(
+                        JSONObject()
+                            .put("tag", "tun-in")
+                            .put("protocol", "tun")
+                            .put("settings", JSONObject().put("name", "xray0").put("MTU", 1500).put("userLevel", 8))
+                    )
+                )
+                .put(
+                    "outbounds",
+                    JSONArray()
+                        .put(
+                            JSONObject()
+                                .put("tag", "proxy")
+                                .put("protocol", "wireguard")
+                                .put("settings", wgSettings)
+                        )
+                        .put(JSONObject().put("tag", "direct").put("protocol", "freedom"))
+                        .put(JSONObject().put("tag", "block").put("protocol", "blackhole"))
+                )
+            entity.copy(rawConfigJson = root.toString(2))
+        } catch (_: Exception) {
+            null
+        }
+    }
+
+    private fun parseSocksUri(
+        uriLine: String,
+        subscriptionUrl: String,
+        isCustom: Boolean
+    ): ServerEntity? {
+        return try {
+            val withoutScheme = uriLine.substringAfter("://")
+            val remark = if (withoutScheme.contains("#")) {
+                safeUrlDecode(withoutScheme.substringAfterLast("#"))
+            } else ""
+            val mainPart = withoutScheme.substringBefore("#").substringBefore("?")
+            val (userInfo, hostPort) = if (mainPart.contains("@")) {
+                val rawUser = mainPart.substringBeforeLast("@")
+                val decodedUser = tryDecodeBase64(rawUser) ?: safeUrlDecode(rawUser)
+                decodedUser to mainPart.substringAfterLast("@")
+            } else {
+                "" to mainPart
+            }
+            val (host, port) = extractHostAndPort(hostPort.trim(), defaultPort = 1080)
+            if (host.isBlank() || host.contains(" ")) return null
+
+            val (countryName, countryCode) = inferCountryFromRemarkOrHost(remark, host)
+            val serverObj = JSONObject()
+                .put("address", host)
+                .put("port", port)
+            if (userInfo.contains(":")) {
+                val user = userInfo.substringBefore(":")
+                val pass = userInfo.substringAfter(":")
+                if (user.isNotBlank()) {
+                    serverObj.put(
+                        "users",
+                        JSONArray().put(JSONObject().put("user", user).put("pass", pass))
+                    )
+                }
+            }
+
+            val root = JSONObject()
+                .put("log", JSONObject().put("loglevel", "warning"))
+                .put("inbounds", JSONArray())
+                .put(
+                    "outbounds",
+                    JSONArray()
+                        .put(
+                            JSONObject()
+                                .put("tag", "proxy")
+                                .put("protocol", "socks")
+                                .put("settings", JSONObject().put("servers", JSONArray().put(serverObj)))
+                        )
+                        .put(JSONObject().put("tag", "direct").put("protocol", "freedom"))
+                        .put(JSONObject().put("tag", "block").put("protocol", "blackhole"))
+                )
+
+            ServerEntity(
+                countryName = countryName,
+                countryCode = countryCode,
+                protocolDisplay = "V2Ray · SOCKS5 · $host",
+                protocolCore = "SOCKS5 (Xray)",
+                transport = "SOCKS5",
+                host = host,
+                resolvedIp = host,
+                port = port,
+                uuidOrPassword = userInfo.ifBlank { "noauth" },
+                rawConfigJson = root.toString(2),
+                shareUri = uriLine,
+                pingMs = 0,
+                protocolTier = 6,
+                isCustom = isCustom,
+                subscriptionUrl = subscriptionUrl
+            )
+        } catch (_: Exception) {
+            null
+        }
+    }
+
     private fun extractHostAndPort(hostPort: String, defaultPort: Int = 443): Pair<String, Int> {
         val cleaned = hostPort.substringBefore("/")
         return if (cleaned.startsWith("[")) {
@@ -1163,10 +1431,17 @@ class V2RayParserAndFletcher {
 
                 val vnext = settings.optJSONArray("vnext")
                 val serversArr = settings.optJSONArray("servers")
+                val peersArr = settings.optJSONArray("peers")
                 if (protocol == "hysteria" || protocol == "hysteria2") {
                     host = settings.optString("address", "").trim()
                     port = settings.optInt("port", 443)
                     credential = streamSettings.optJSONObject("hysteriaSettings")?.optString("auth").orEmpty()
+                } else if (protocol == "wireguard" && peersArr != null && peersArr.length() > 0) {
+                    val endpoint = peersArr.getJSONObject(0).optString("endpoint", "").trim()
+                    val (wgHost, wgPort) = extractHostAndPort(endpoint, defaultPort = 51820)
+                    host = wgHost
+                    port = wgPort
+                    credential = settings.optString("secretKey", "")
                 } else if (vnext != null && vnext.length() > 0) {
                     val first = vnext.getJSONObject(0)
                     host = first.optString("address", "").trim()
@@ -1179,7 +1454,7 @@ class V2RayParserAndFletcher {
                     val first = serversArr.getJSONObject(0)
                     host = first.optString("address", "").trim()
                     port = first.optInt("port", 443)
-                    credential = first.optString("password", "")
+                    credential = first.optString("password", "").ifBlank { "noauth" }
                 }
 
                 if (host.isBlank()) continue
@@ -1189,11 +1464,16 @@ class V2RayParserAndFletcher {
                 val sni = realitySettings?.optString("serverName")
                     ?: tlsSettings?.optString("serverName")
                     ?: ""
-                val pbk = realitySettings?.optString("publicKey").orEmpty()
+                val pbk = realitySettings?.optString("publicKey")
+                    ?: peersArr?.optJSONObject(0)?.optString("publicKey")
+                    ?: ""
 
                 val transportLabel = when {
                     protocol == "hysteria" || protocol == "hysteria2" -> "Hysteria2"
+                    protocol == "wireguard" -> "WireGuard"
+                    protocol == "socks" -> "SOCKS5"
                     security == "reality" -> "Reality"
+                    network == "xhttp" || network == "splithttp" -> "XHTTP"
                     network == "grpc" -> "gRPC"
                     network == "ws" -> "WebSocket"
                     protocol == "trojan" -> "Trojan"
@@ -1206,6 +1486,8 @@ class V2RayParserAndFletcher {
                     "trojan" -> "Trojan (V2Ray)"
                     "shadowsocks" -> "Shadowsocks (Xray)"
                     "hysteria", "hysteria2" -> "Hysteria2 (Xray)"
+                    "wireguard" -> "WireGuard (Xray)"
+                    "socks" -> "SOCKS5 (Xray)"
                     else -> "VLESS (V2Ray)"
                 }
 
@@ -1309,6 +1591,7 @@ class V2RayParserAndFletcher {
         } else {
             params?.network?.ifBlank { null } ?: when (server.transport.lowercase()) {
                 "websocket", "ws" -> "ws"
+                "xhttp", "splithttp" -> "xhttp"
                 "grpc" -> "grpc"
                 "http/2", "h2" -> "h2"
                 else -> "tcp"
@@ -1504,6 +1787,15 @@ class V2RayParserAndFletcher {
                 }
                 streamSettings.put("httpupgradeSettings", huObj)
             }
+            "xhttp" -> {
+                val xhttpObj = JSONObject()
+                    .put("path", params?.wsPath?.ifBlank { "/" } ?: "/")
+                val hostHeader = params?.wsHost?.ifBlank { server.sni }.orEmpty()
+                if (hostHeader.isNotBlank()) {
+                    xhttpObj.put("host", hostHeader)
+                }
+                streamSettings.put("xhttpSettings", xhttpObj)
+            }
             "grpc" -> {
                 streamSettings.put(
                     "grpcSettings",
@@ -1549,13 +1841,14 @@ class V2RayParserAndFletcher {
     }
 
     /**
-     * Applies user DNS, Routing Mode (CIDR-only since geoip.dat/geosite.dat are omitted in Lite AAR),
-     * IPv6 strategy, TUN vs local proxy inbounds, ordered proxy/direct/block outbounds,
-     * QUIC UDP/443 block, IPv6 leak block, and Xray traffic stats policy.
+     * Applies user DNS, Routing Mode (GeoIP/Geosite rules when `geoip.dat` & `geosite.dat` are
+     * installed, with automatic CIDR fallback), IPv6 strategy, TUN vs local proxy inbounds,
+     * ordered proxy/direct/block outbounds, QUIC UDP/443 block, IPv6 leak block, and Xray stats.
      */
     fun applyRuntimeSettingsToXrayJson(
         baseJson: String,
-        settings: AppSettingsState
+        settings: AppSettingsState,
+        hasGeoAssets: Boolean = false
     ): String {
         return try {
             val root = JSONObject(baseJson)
@@ -1680,7 +1973,7 @@ class V2RayParserAndFletcher {
                     .put("queryStrategy", if (settings.ipv6Enabled) "UseIP" else "UseIPv4")
             )
 
-            // 4. Routing rules (CIDR/network-based; LAN bypass placed first when active)
+            // 4. Routing rules (real GeoIP/Geosite when geoip.dat/geosite.dat exist, plus CIDR rules)
             val rules = JSONArray()
             if (settings.routingMode.contains("Direct Only", ignoreCase = true)) {
                 rules.put(
@@ -1701,9 +1994,16 @@ class V2RayParserAndFletcher {
                         .put("fc00::/7")
                         .put("fe80::/10")
                         .put("ff00::/8")
-                    if (settings.routingMode.contains("Domestic", ignoreCase = true)) {
+                    val includeDomestic = settings.routingMode.contains("Domestic", ignoreCase = true)
+                    if (includeDomestic) {
                         bypassCidrs.put("100.64.0.0/10")
                         bypassCidrs.put("198.18.0.0/15")
+                        if (hasGeoAssets) {
+                            bypassCidrs.put("geoip:private")
+                            bypassCidrs.put("geoip:${settings.domesticCountryCode.lowercase()}")
+                        }
+                    } else if (hasGeoAssets) {
+                        bypassCidrs.put("geoip:private")
                     }
                     rules.put(
                         JSONObject()
@@ -1711,6 +2011,21 @@ class V2RayParserAndFletcher {
                             .put("ip", bypassCidrs)
                             .put("outboundTag", "direct")
                     )
+
+                    if (hasGeoAssets) {
+                        val bypassDomains = JSONArray().put("geosite:private")
+                        if (includeDomestic) {
+                            val code = settings.domesticCountryCode.lowercase()
+                            val geositeTag = if (code == "cn") "geosite:cn" else "geosite:category-$code"
+                            bypassDomains.put(geositeTag)
+                        }
+                        rules.put(
+                            JSONObject()
+                                .put("type", "field")
+                                .put("domain", bypassDomains)
+                                .put("outboundTag", "direct")
+                        )
+                    }
                 }
                 if (!settings.ipv6Enabled) {
                     rules.put(
@@ -1741,7 +2056,7 @@ class V2RayParserAndFletcher {
             root.put(
                 "routing",
                 JSONObject()
-                    .put("domainStrategy", "AsIs")
+                    .put("domainStrategy", if (hasGeoAssets) "IPIfNonMatch" else "AsIs")
                     .put("rules", rules)
             )
 

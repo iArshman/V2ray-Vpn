@@ -1,6 +1,6 @@
 {
-  "name": "Remix V2ray-Vpn",
-  "description": "Imported from GitHub",
+  "name": "Hollow VPN",
+  "description": "Fast, private V2Ray/Xray VPN client for Android with subscription management, QR code import, and server diagnostics.",
   "requestFramePermissions": [],
   "majorCapabilities": [
     "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"

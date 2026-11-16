@@ -1212,11 +1212,20 @@ fun ServerItemRowContent(
             )
         }
 
-        Text(
-            text = if (server.pingMs > 0) "${server.pingMs} ms" else "Timeout",
-            style = TabularMonoBody.copy(fontSize = 12.5.sp, fontWeight = FontWeight.SemiBold),
-            color = pingColor
-        )
+        Column(horizontalAlignment = Alignment.End) {
+            Text(
+                text = if (server.pingMs > 0) "${server.pingMs} ms" else "Timeout",
+                style = TabularMonoBody.copy(fontSize = 12.5.sp, fontWeight = FontWeight.SemiBold),
+                color = pingColor
+            )
+            if (server.lastSpeedMbps > 0.0) {
+                Text(
+                    text = String.format(Locale.US, "%.1f MB/s", server.lastSpeedMbps),
+                    style = TabularMonoBody.copy(fontSize = 10.5.sp, fontWeight = FontWeight.Medium),
+                    color = HollowInkSecondary
+                )
+            }
+        }
 
         if (!isSelectionMode) {
             Box {

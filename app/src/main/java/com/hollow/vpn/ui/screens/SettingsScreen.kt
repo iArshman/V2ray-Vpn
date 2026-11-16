@@ -7,6 +7,12 @@ import android.content.Intent
 import android.content.pm.PackageManager
 import android.provider.Settings
 import androidx.activity.compose.BackHandler
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.expandVertically
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.shrinkVertically
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -46,8 +52,10 @@ import androidx.compose.material.icons.outlined.Search
 import androidx.compose.material.icons.outlined.Shield
 import androidx.compose.material.icons.outlined.SwapHoriz
 import androidx.compose.material.icons.outlined.Terminal
+import androidx.compose.material.icons.outlined.Tune
 import androidx.compose.material.icons.outlined.VisibilityOff
 import androidx.compose.material.icons.rounded.AccountTree
+import androidx.compose.material.icons.rounded.KeyboardArrowDown
 import androidx.compose.material.icons.rounded.Route
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
@@ -70,10 +78,12 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.rotate
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
@@ -107,59 +117,93 @@ private enum class ActiveSettingDialog {
     UPDATE_INTERVAL,
     PROTOCOL,
     ROUTING_MODE,
+    DOMESTIC_REGION,
     DNS_PROVIDER,
     XRAY_LOGS,
     CLEAR_CACHE_CONFIRM
 }
 
 internal val UPDATE_INTERVAL_OPTIONS = listOf(
-    SettingChoiceOption("15 min", "High-frequency auto-refresh"),
-    SettingChoiceOption("30 min", "Balanced refresh interval"),
-    SettingChoiceOption("1 hour", "Recommended standard interval"),
-    SettingChoiceOption("6 hours", "Battery-saving interval"),
-    SettingChoiceOption("12 hours", "Twice-daily subscription refresh"),
-    SettingChoiceOption("24 hours", "Daily subscription refresh")
+    SettingChoiceOption("15 min", "Checks often — best if servers drop frequently", "Every 15 min"),
+    SettingChoiceOption("30 min", "Checks twice an hour for faster servers", "Every 30 min"),
+    SettingChoiceOption("1 hour", "Balanced speed and battery usage", "Every 1 hour (Recommended)"),
+    SettingChoiceOption("6 hours", "Light background usage to save battery", "Every 6 hours"),
+    SettingChoiceOption("12 hours", "Checks twice a day", "Every 12 hours"),
+    SettingChoiceOption("24 hours", "Checks once a day", "Once a day")
 )
 
 private val PROTOCOL_OPTIONS = listOf(
-    SettingChoiceOption("Auto (V2Ray)", "Automatically select the fastest available route", "Auto (Recommended)"),
-    SettingChoiceOption("VLESS (Reality)", "Reality TLS stealth camouflage with ultra-low latency", "VLESS · Reality"),
-    SettingChoiceOption("VLESS (WS / TCP)", "Lightweight stateless stream transport", "VLESS · WS / TCP"),
-    SettingChoiceOption("VMess (WebSocket)", "Encrypted WebSocket tunnel", "VMess · WebSocket"),
-    SettingChoiceOption("Trojan (TLS)", "HTTPS-disguised TLS tunnel", "Trojan · TLS"),
-    SettingChoiceOption("Hysteria2", "QUIC-based high-throughput stealth tunnel", "Hysteria2"),
-    SettingChoiceOption("gRPC", "Multiplexed HTTP/2 stream transport", "gRPC"),
-    SettingChoiceOption("Shadowsocks", "Fast stream cipher proxy", "Shadowsocks")
+    SettingChoiceOption("Auto (V2Ray)", "Picks the fastest and hardest-to-block connection automatically", "Auto (Recommended)"),
+    SettingChoiceOption("VLESS (Reality)", "Modern stealth mode — best for strict networks", "Stealth (Reality)"),
+    SettingChoiceOption("VLESS (WS / TCP)", "Simple fast tunnel for everyday browsing", "Fast Direct (VLESS)"),
+    SettingChoiceOption("VMess (WebSocket)", "Widely supported fallback tunnel", "Standard (VMess)"),
+    SettingChoiceOption("Trojan (TLS)", "Looks like normal HTTPS web browsing", "HTTPS Stealth (Trojan)"),
+    SettingChoiceOption("Hysteria2", "High-speed mode for video streaming and downloads", "High Speed (Hysteria2)"),
+    SettingChoiceOption("gRPC", "Stable tunnel for unstable mobile data", "Mobile Stable (gRPC)"),
+    SettingChoiceOption("Shadowsocks", "Lightweight cipher proxy", "Lightweight (Shadowsocks)")
 )
 
 private val ROUTING_MODE_OPTIONS = listOf(
-    SettingChoiceOption("Global", "Route all device traffic through the VPN tunnel"),
-    SettingChoiceOption("Bypass LAN", "Tunnel internet traffic while keeping local LAN (192.168.x.x) direct"),
-    SettingChoiceOption("Bypass LAN & Domestic", "Keep local & domestic subnets direct; tunnel international traffic"),
-    SettingChoiceOption("Direct Only", "Diagnostic mode with direct connection")
+    SettingChoiceOption("Global", "Protect all internet traffic through the VPN", "Protect everything (Recommended)"),
+    SettingChoiceOption("Bypass LAN", "Keep home Wi‑Fi devices like printers and TVs reachable directly", "Allow local Wi‑Fi devices"),
+    SettingChoiceOption("Bypass LAN & Domestic", "Use direct speed for home-country websites and VPN for blocked sites", "Keep local sites direct"),
+    SettingChoiceOption("Direct Only", "Testing mode — sends traffic directly without VPN", "No VPN (Testing only)")
+)
+
+private val DOMESTIC_REGION_OPTIONS = listOf(
+    SettingChoiceOption("IR", "Keep Iranian websites & banks direct", "Iran (IR)"),
+    SettingChoiceOption("CN", "Keep Chinese websites & apps direct", "China (CN)"),
+    SettingChoiceOption("RU", "Keep Russian websites & apps direct", "Russia (RU)"),
+    SettingChoiceOption("TR", "Keep Turkish websites & apps direct", "Turkey (TR)")
 )
 
 private val DNS_PROVIDER_OPTIONS = listOf(
-    SettingChoiceOption("Auto (DoH)", "Encrypted DNS-over-HTTPS (1.1.1.1 / 1.0.0.1)"),
-    SettingChoiceOption("Cloudflare 1.1.1.1", "Fast privacy-first DNS resolver (1.1.1.1)"),
-    SettingChoiceOption("Google 8.8.8.8", "Reliable global DNS resolver (8.8.8.8)"),
-    SettingChoiceOption("Quad9 9.9.9.9", "Security & malware-blocking DNS (9.9.9.9)"),
-    SettingChoiceOption("AdGuard 94.140.14.14", "Ad-blocking and tracker-filtering DNS (94.140.14.14)")
+    SettingChoiceOption("Auto (DoH)", "Encrypted private lookups — safest default", "Auto Private DNS (Recommended)"),
+    SettingChoiceOption("Cloudflare 1.1.1.1", "Fast privacy-focused DNS by Cloudflare", "Cloudflare (1.1.1.1)"),
+    SettingChoiceOption("Google 8.8.8.8", "Reliable global DNS by Google", "Google (8.8.8.8)"),
+    SettingChoiceOption("Quad9 9.9.9.9", "Blocks malicious and phishing websites automatically", "Quad9 Security (9.9.9.9)"),
+    SettingChoiceOption("AdGuard 94.140.14.14", "Helps block ads and trackers across apps", "AdGuard Ad-Block")
 )
 
+private fun formatRoutingSummary(mode: String): String = when {
+    mode.equals("Global", ignoreCase = true) -> "Everything"
+    mode.equals("Bypass LAN", ignoreCase = true) -> "Skip Wi‑Fi"
+    mode.contains("Domestic", ignoreCase = true) -> "Smart local"
+    mode.contains("Direct", ignoreCase = true) -> "Testing"
+    else -> mode
+}
+
+private fun formatDnsSummary(dns: String): String = when {
+    dns.startsWith("Auto", ignoreCase = true) -> "Auto Safe"
+    dns.contains("Cloudflare", ignoreCase = true) -> "Cloudflare"
+    dns.contains("Google", ignoreCase = true) -> "Google"
+    dns.contains("Quad9", ignoreCase = true) -> "Quad9"
+    dns.contains("AdGuard", ignoreCase = true) -> "AdGuard"
+    else -> dns
+}
+
+private fun formatGeoBadge(status: String): String = when {
+    status.startsWith("Installed", ignoreCase = true) ->
+        status.removePrefix("Installed").trim().removeSurrounding("(", ")").ifBlank { "Ready" }
+    status.startsWith("Not downloaded", ignoreCase = true) -> "Optional"
+    else -> status
+}
+
 /**
- * PAGE 6: Hollow Editorial Settings Screen
+ * PAGE 6: Hollow Consumer-First Editorial Settings Screen
  */
 @Composable
 fun SettingsScreen(
     settings: AppSettingsState,
     xrayLogs: List<String> = emptyList(),
     serverCount: Int = 0,
+    geoAssetsStatus: String = "Not downloaded (CIDR fallback)",
     onUpdateSettings: ((AppSettingsState) -> AppSettingsState) -> Unit,
     onOpenAddSubscription: () -> Unit,
     onOpenGettingStarted: () -> Unit = {},
     onClearXrayLogs: () -> Unit = {},
     onExportServers: () -> Unit = {},
+    onDownloadGeoAssets: () -> Unit = {},
     onShowMessage: (String) -> Unit = {},
     onClearCache: () -> Unit,
     onBack: () -> Unit
@@ -168,6 +212,7 @@ fun SettingsScreen(
     val context = LocalContext.current
     var activeDialog by remember { mutableStateOf<ActiveSettingDialog?>(null) }
     var showPerAppPicker by remember { mutableStateOf(false) }
+    var advancedExpanded by rememberSaveable { mutableStateOf(false) }
 
     Box(
         modifier = Modifier
@@ -212,76 +257,85 @@ fun SettingsScreen(
             )
             Spacer(modifier = Modifier.height(4.dp))
             Text(
-                text = "Tunnel, routing & privacy",
+                text = "Simple controls for everyday privacy",
                 style = MaterialTheme.typography.bodyMedium.copy(fontSize = 14.sp),
                 color = HollowInkSecondary
             )
 
             Spacer(modifier = Modifier.height(26.dp))
 
-            // Section 1: CONFIGURATION
-            SettingsSectionHeader(title = "CONFIGURATION")
+            // Section 1: ESSENTIALS (Plain-English daily controls)
+            SettingsSectionHeader(title = "ESSENTIALS")
+
+            SettingsToggleRow(
+                icon = Icons.Outlined.PlayArrow,
+                title = "Connect automatically",
+                subtitle = "Start protecting your connection when you open Hollow",
+                checked = settings.startOnAppOpen,
+                onCheckedChange = { enabled ->
+                    onUpdateSettings { it.copy(startOnAppOpen = enabled) }
+                },
+                testTag = "switch_start_on_open"
+            )
+            HorizontalDivider(thickness = 1.dp, color = HollowCreamDivider)
+
+            SettingsToggleRow(
+                icon = Icons.Outlined.Refresh,
+                title = "Auto-switch slow servers",
+                subtitle = "Move to a faster server if your internet freezes",
+                checked = settings.smartSwitchEnabled,
+                onCheckedChange = { enabled ->
+                    onUpdateSettings { it.copy(smartSwitchEnabled = enabled) }
+                },
+                testTag = "switch_smart_switch"
+            )
+            HorizontalDivider(thickness = 1.dp, color = HollowCreamDivider)
+
+            SettingsValueNavigationRow(
+                icon = Icons.Outlined.Link,
+                title = "Manage servers & links",
+                subtitle = "Add a subscription link, server key, or QR code",
+                valueText = if (serverCount > 0) "$serverCount saved" else null,
+                onClick = onOpenAddSubscription,
+                testTag = "row_custom_subscription"
+            )
+            HorizontalDivider(thickness = 1.dp, color = HollowCreamDivider)
 
             SettingsToggleRow(
                 icon = Icons.Outlined.CloudQueue,
-                title = "Auto configure",
-                subtitle = "Fetch and optimize servers automatically",
+                title = "Keep servers fresh",
+                subtitle = "Automatically test and update your server list",
                 checked = settings.autoConfigure,
                 onCheckedChange = { enabled ->
                     onUpdateSettings { it.copy(autoConfigure = enabled) }
                 },
                 testTag = "switch_auto_configure"
             )
-            HorizontalDivider(thickness = 1.dp, color = HollowCreamDivider)
-
-            SettingsValueNavigationRow(
-                icon = Icons.Outlined.Refresh,
-                title = "Update interval",
-                subtitle = "Refresh server list automatically",
-                valueText = settings.updateIntervalLabel,
-                onClick = { activeDialog = ActiveSettingDialog.UPDATE_INTERVAL },
-                testTag = "row_update_interval"
-            )
-            HorizontalDivider(thickness = 1.dp, color = HollowCreamDivider)
-
-            SettingsValueNavigationRow(
-                icon = Icons.Outlined.Link,
-                title = "Custom subscription",
-                subtitle = "Add your server subscription link",
-                valueText = null,
-                onClick = onOpenAddSubscription,
-                testTag = "row_custom_subscription"
-            )
+            if (settings.autoConfigure) {
+                HorizontalDivider(thickness = 1.dp, color = HollowCreamDivider)
+                SettingsValueNavigationRow(
+                    icon = Icons.Outlined.Refresh,
+                    title = "Refresh schedule",
+                    subtitle = "How often Hollow checks for faster servers",
+                    valueText = settings.updateIntervalLabel,
+                    onClick = { activeDialog = ActiveSettingDialog.UPDATE_INTERVAL },
+                    testTag = "row_update_interval"
+                )
+            }
 
             Spacer(modifier = Modifier.height(28.dp))
 
-            // Section 2: CONNECTION
-            SettingsSectionHeader(title = "CONNECTION")
-
-            SettingsValueNavigationRow(
-                icon = Icons.Rounded.AccountTree,
-                title = "Protocol",
-                subtitle = null,
-                valueText = formatConsumerProtocol(settings.protocolPreference),
-                onClick = { activeDialog = ActiveSettingDialog.PROTOCOL },
-                testTag = "row_protocol"
-            )
-            HorizontalDivider(thickness = 1.dp, color = HollowCreamDivider)
-
-            SettingsValueNavigationRow(
-                icon = Icons.Rounded.Route,
-                title = "Routing mode",
-                subtitle = null,
-                valueText = settings.routingMode,
-                onClick = { activeDialog = ActiveSettingDialog.ROUTING_MODE },
-                testTag = "row_routing_mode"
-            )
-            HorizontalDivider(thickness = 1.dp, color = HollowCreamDivider)
+            // Section 2: PRIVACY & APPS
+            SettingsSectionHeader(title = "PRIVACY & APPS")
 
             SettingsToggleRow(
-                icon = Icons.Outlined.Shield,
-                title = "Per-app proxy",
-                subtitle = "Proxy only selected apps, or bypass them",
+                icon = Icons.Outlined.Apps,
+                title = "Choose which apps use VPN",
+                subtitle = if (settings.perAppProxyEnabled) {
+                    "Only your selected apps are customized below"
+                } else {
+                    "All apps are protected right now"
+                },
                 checked = settings.perAppProxyEnabled,
                 onCheckedChange = { enabled ->
                     onUpdateSettings { it.copy(perAppProxyEnabled = enabled) }
@@ -292,17 +346,17 @@ fun SettingsScreen(
                 HorizontalDivider(thickness = 1.dp, color = HollowCreamDivider)
                 SettingsValueNavigationRow(
                     icon = Icons.Outlined.Apps,
-                    title = "Choose apps",
-                    subtitle = "Select packages affected by the VPN",
-                    valueText = "${settings.selectedAppPackages.size} selected",
+                    title = "Select apps",
+                    subtitle = "Pick apps to include or exclude",
+                    valueText = "${settings.selectedAppPackages.size} apps",
                     onClick = { showPerAppPicker = true },
                     testTag = "row_per_app_selection"
                 )
                 HorizontalDivider(thickness = 1.dp, color = HollowCreamDivider)
                 SettingsToggleRow(
                     icon = Icons.Outlined.SwapHoriz,
-                    title = "Bypass selected apps",
-                    subtitle = "Selected apps stay on the normal connection",
+                    title = "Exclude selected apps instead",
+                    subtitle = "Selected apps skip the VPN (great for banking apps)",
                     checked = settings.bypassSelectedApps,
                     onCheckedChange = { enabled ->
                         onUpdateSettings { it.copy(bypassSelectedApps = enabled) }
@@ -313,44 +367,10 @@ fun SettingsScreen(
             HorizontalDivider(thickness = 1.dp, color = HollowCreamDivider)
 
             SettingsValueNavigationRow(
-                icon = Icons.Outlined.Dns,
-                title = "DNS",
-                subtitle = null,
-                valueText = settings.dnsMode,
-                onClick = { activeDialog = ActiveSettingDialog.DNS_PROVIDER },
-                testTag = "row_dns"
-            )
-            HorizontalDivider(thickness = 1.dp, color = HollowCreamDivider)
-
-            SettingsToggleRow(
-                icon = Icons.Outlined.Shield,
-                title = "TUN mode",
-                subtitle = "Route all apps through VPN",
-                checked = settings.tunMode,
-                onCheckedChange = { enabled ->
-                    onUpdateSettings { it.copy(tunMode = enabled) }
-                },
-                testTag = "switch_tun_mode"
-            )
-            HorizontalDivider(thickness = 1.dp, color = HollowCreamDivider)
-
-            SettingsToggleRow(
-                icon = Icons.Outlined.Language,
-                title = "IPv6",
-                subtitle = "Enable IPv6 support",
-                checked = settings.ipv6Enabled,
-                onCheckedChange = { enabled ->
-                    onUpdateSettings { it.copy(ipv6Enabled = enabled) }
-                },
-                testTag = "switch_ipv6"
-            )
-            HorizontalDivider(thickness = 1.dp, color = HollowCreamDivider)
-
-            SettingsValueNavigationRow(
                 icon = Icons.Outlined.Lock,
-                title = "Always-on & kill switch",
-                subtitle = "Block connections without VPN",
-                valueText = "Android",
+                title = "Block internet if VPN drops",
+                subtitle = "Opens Android settings for Always-on protection",
+                valueText = "System",
                 onClick = {
                     try {
                         context.startActivity(
@@ -361,60 +381,28 @@ fun SettingsScreen(
                 },
                 testTag = "row_system_vpn_settings"
             )
-
-            Spacer(modifier = Modifier.height(28.dp))
-
-            // Section 3: APP
-            SettingsSectionHeader(title = "APP")
-
-            SettingsToggleRow(
-                icon = Icons.Outlined.PlayArrow,
-                title = "Start on app open",
-                subtitle = "Auto fetch servers and connect",
-                checked = settings.startOnAppOpen,
-                onCheckedChange = { enabled ->
-                    onUpdateSettings { it.copy(startOnAppOpen = enabled) }
-                },
-                testTag = "switch_start_on_open"
-            )
             HorizontalDivider(thickness = 1.dp, color = HollowCreamDivider)
 
             SettingsToggleRow(
                 icon = Icons.Outlined.VisibilityOff,
                 title = "Hide from recent apps",
-                subtitle = "Stay private in app switcher",
+                subtitle = "Blur or hide Hollow in Android's app switcher",
                 checked = settings.hideFromRecentApps,
                 onCheckedChange = { enabled ->
                     onUpdateSettings { it.copy(hideFromRecentApps = enabled) }
                 },
                 testTag = "switch_hide_recents"
             )
-            HorizontalDivider(thickness = 1.dp, color = HollowCreamDivider)
 
-            SettingsValueNavigationRow(
-                icon = Icons.Outlined.Terminal,
-                title = "Diagnostic logs",
-                subtitle = "View live Xray core status & events",
-                valueText = if (xrayLogs.isEmpty()) "Empty" else "${xrayLogs.size}",
-                onClick = { activeDialog = ActiveSettingDialog.XRAY_LOGS },
-                testTag = "row_xray_logs"
-            )
-            HorizontalDivider(thickness = 1.dp, color = HollowCreamDivider)
+            Spacer(modifier = Modifier.height(28.dp))
 
-            SettingsValueNavigationRow(
-                icon = Icons.Outlined.FileUpload,
-                title = "Export servers",
-                subtitle = "Copy all saved configs to clipboard",
-                valueText = "$serverCount",
-                onClick = onExportServers,
-                testTag = "row_export_servers"
-            )
-            HorizontalDivider(thickness = 1.dp, color = HollowCreamDivider)
+            // Section 3: HELP & DATA
+            SettingsSectionHeader(title = "HELP & DATA")
 
             SettingsValueNavigationRow(
                 icon = Icons.Outlined.Info,
-                title = "Getting started",
-                subtitle = "Review setup & permissions guide",
+                title = "Setup & permissions guide",
+                subtitle = "Check VPN and battery permissions if connection stops",
                 valueText = null,
                 onClick = onOpenGettingStarted,
                 testTag = "row_getting_started"
@@ -423,13 +411,206 @@ fun SettingsScreen(
 
             SettingsValueNavigationRow(
                 icon = Icons.Outlined.DeleteOutline,
-                title = "Clear cache",
-                subtitle = "Remove cached servers",
+                title = "Clear saved servers",
+                subtitle = "Remove cached servers from this phone",
                 valueText = null,
                 isDestructive = true,
                 onClick = { activeDialog = ActiveSettingDialog.CLEAR_CACHE_CONFIRM },
                 testTag = "row_clear_cache"
             )
+
+            Spacer(modifier = Modifier.height(28.dp))
+
+            // Section 4: ADVANCED (Collapsed by default so beginners aren't overwhelmed)
+            val chevronRotation by animateFloatAsState(
+                targetValue = if (advancedExpanded) 180f else 0f,
+                label = "advanced_chevron"
+            )
+            Surface(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(18.dp))
+                    .clickable(role = Role.Button) { advancedExpanded = !advancedExpanded }
+                    .testTag("row_advanced_settings"),
+                shape = RoundedCornerShape(18.dp),
+                color = HollowCreamSurface
+            ) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .minimumInteractiveComponentSize()
+                        .padding(horizontal = 16.dp, vertical = 14.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Icon(
+                        imageVector = Icons.Outlined.Tune,
+                        contentDescription = null,
+                        tint = HollowOrange,
+                        modifier = Modifier.size(20.dp)
+                    )
+                    Spacer(modifier = Modifier.width(14.dp))
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(
+                            text = "Advanced settings",
+                            style = MaterialTheme.typography.titleMedium.copy(
+                                fontWeight = FontWeight.SemiBold,
+                                fontSize = 15.5.sp
+                            ),
+                            color = HollowInk
+                        )
+                        Spacer(modifier = Modifier.height(2.dp))
+                        Text(
+                            text = "Protocols, DNS, censorship bypass & logs",
+                            style = MaterialTheme.typography.bodySmall.copy(fontSize = 12.5.sp),
+                            color = HollowInkSecondary
+                        )
+                    }
+                    Icon(
+                        imageVector = Icons.Rounded.KeyboardArrowDown,
+                        contentDescription = if (advancedExpanded) "Hide advanced settings" else "Show advanced settings",
+                        tint = HollowInkSecondary,
+                        modifier = Modifier
+                            .size(22.dp)
+                            .rotate(chevronRotation)
+                    )
+                }
+            }
+
+            AnimatedVisibility(
+                visible = advancedExpanded,
+                enter = expandVertically() + fadeIn(),
+                exit = shrinkVertically() + fadeOut()
+            ) {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(top = 18.dp)
+                ) {
+                    SettingsSectionHeader(title = "CONNECTION & SAFETY")
+
+                    SettingsValueNavigationRow(
+                        icon = Icons.Rounded.AccountTree,
+                        title = "VPN protocol",
+                        subtitle = "Leave on Auto unless a network blocks connections",
+                        valueText = formatConsumerProtocol(settings.protocolPreference),
+                        onClick = { activeDialog = ActiveSettingDialog.PROTOCOL },
+                        testTag = "row_protocol"
+                    )
+                    HorizontalDivider(thickness = 1.dp, color = HollowCreamDivider)
+
+                    SettingsToggleRow(
+                        icon = Icons.Outlined.SwapHoriz,
+                        title = "Backup download mirrors",
+                        subtitle = "Try CDN mirrors if your ISP blocks server links",
+                        checked = settings.mirrorsEnabled,
+                        onCheckedChange = { enabled ->
+                            onUpdateSettings { it.copy(mirrorsEnabled = enabled) }
+                        },
+                        testTag = "switch_mirrors_enabled"
+                    )
+                    HorizontalDivider(thickness = 1.dp, color = HollowCreamDivider)
+
+                    SettingsToggleRow(
+                        icon = Icons.Outlined.Lock,
+                        title = "Strict encryption check",
+                        subtitle = "Block insecure or unencrypted servers automatically",
+                        checked = settings.strictTlsEnabled,
+                        onCheckedChange = { enabled ->
+                            onUpdateSettings { it.copy(strictTlsEnabled = enabled) }
+                        },
+                        testTag = "switch_strict_tls"
+                    )
+
+                    Spacer(modifier = Modifier.height(22.dp))
+                    SettingsSectionHeader(title = "NETWORK & ROUTING")
+
+                    SettingsValueNavigationRow(
+                        icon = Icons.Rounded.Route,
+                        title = "Traffic routing",
+                        subtitle = "Choose whether local or home sites skip VPN",
+                        valueText = formatRoutingSummary(settings.routingMode),
+                        onClick = { activeDialog = ActiveSettingDialog.ROUTING_MODE },
+                        testTag = "row_routing_mode"
+                    )
+                    if (settings.routingMode.contains("Domestic", ignoreCase = true)) {
+                        HorizontalDivider(thickness = 1.dp, color = HollowCreamDivider)
+                        SettingsValueNavigationRow(
+                            icon = Icons.Outlined.Language,
+                            title = "Home country",
+                            subtitle = "Country sites kept on normal connection",
+                            valueText = settings.domesticCountryCode,
+                            onClick = { activeDialog = ActiveSettingDialog.DOMESTIC_REGION },
+                            testTag = "row_domestic_region"
+                        )
+                    }
+                    HorizontalDivider(thickness = 1.dp, color = HollowCreamDivider)
+
+                    SettingsValueNavigationRow(
+                        icon = Icons.Outlined.CloudQueue,
+                        title = "Country rules database",
+                        subtitle = "Optional GeoIP & Geosite data for local bypass",
+                        valueText = formatGeoBadge(geoAssetsStatus),
+                        onClick = onDownloadGeoAssets,
+                        testTag = "row_geo_assets"
+                    )
+                    HorizontalDivider(thickness = 1.dp, color = HollowCreamDivider)
+
+                    SettingsValueNavigationRow(
+                        icon = Icons.Outlined.Dns,
+                        title = "Private DNS",
+                        subtitle = "Encrypt website address lookups",
+                        valueText = formatDnsSummary(settings.dnsMode),
+                        onClick = { activeDialog = ActiveSettingDialog.DNS_PROVIDER },
+                        testTag = "row_dns"
+                    )
+                    HorizontalDivider(thickness = 1.dp, color = HollowCreamDivider)
+
+                    SettingsToggleRow(
+                        icon = Icons.Outlined.Shield,
+                        title = "Full-device VPN (TUN mode)",
+                        subtitle = "Turn off only to run as a local proxy on port 10808",
+                        checked = settings.tunMode,
+                        onCheckedChange = { enabled ->
+                            onUpdateSettings { it.copy(tunMode = enabled) }
+                        },
+                        testTag = "switch_tun_mode"
+                    )
+                    HorizontalDivider(thickness = 1.dp, color = HollowCreamDivider)
+
+                    SettingsToggleRow(
+                        icon = Icons.Outlined.Language,
+                        title = "IPv6 support",
+                        subtitle = "Enable if your network uses IPv6 addresses",
+                        checked = settings.ipv6Enabled,
+                        onCheckedChange = { enabled ->
+                            onUpdateSettings { it.copy(ipv6Enabled = enabled) }
+                        },
+                        testTag = "switch_ipv6"
+                    )
+
+                    Spacer(modifier = Modifier.height(22.dp))
+                    SettingsSectionHeader(title = "DIAGNOSTICS & BACKUP")
+
+                    SettingsValueNavigationRow(
+                        icon = Icons.Outlined.Terminal,
+                        title = "Connection logs",
+                        subtitle = "Technical status for troubleshooting",
+                        valueText = if (xrayLogs.isEmpty()) "Empty" else "${xrayLogs.size}",
+                        onClick = { activeDialog = ActiveSettingDialog.XRAY_LOGS },
+                        testTag = "row_xray_logs"
+                    )
+                    HorizontalDivider(thickness = 1.dp, color = HollowCreamDivider)
+
+                    SettingsValueNavigationRow(
+                        icon = Icons.Outlined.FileUpload,
+                        title = "Back up servers",
+                        subtitle = "Copy all saved server configs to clipboard",
+                        valueText = "$serverCount",
+                        onClick = onExportServers,
+                        testTag = "row_export_servers"
+                    )
+                }
+            }
 
             Spacer(modifier = Modifier.height(32.dp))
             Spacer(modifier = Modifier.navigationBarsPadding())
@@ -439,7 +620,7 @@ fun SettingsScreen(
     when (activeDialog) {
         ActiveSettingDialog.UPDATE_INTERVAL -> {
             SettingOptionPickerDialog(
-                title = "Select Update Interval",
+                title = "Refresh schedule",
                 options = UPDATE_INTERVAL_OPTIONS,
                 selectedValue = settings.updateIntervalLabel,
                 onSelect = { chosen ->
@@ -454,7 +635,7 @@ fun SettingsScreen(
 
         ActiveSettingDialog.PROTOCOL -> {
             SettingOptionPickerDialog(
-                title = "Connection Protocol",
+                title = "VPN protocol",
                 options = PROTOCOL_OPTIONS,
                 selectedValue = settings.protocolPreference,
                 onSelect = { chosen ->
@@ -467,7 +648,7 @@ fun SettingsScreen(
 
         ActiveSettingDialog.ROUTING_MODE -> {
             SettingOptionPickerDialog(
-                title = "Select Routing Mode",
+                title = "Traffic routing",
                 options = ROUTING_MODE_OPTIONS,
                 selectedValue = settings.routingMode,
                 onSelect = { chosen ->
@@ -478,9 +659,22 @@ fun SettingsScreen(
             )
         }
 
+        ActiveSettingDialog.DOMESTIC_REGION -> {
+            SettingOptionPickerDialog(
+                title = "Home country",
+                options = DOMESTIC_REGION_OPTIONS,
+                selectedValue = settings.domesticCountryCode,
+                onSelect = { chosen ->
+                    onUpdateSettings { it.copy(domesticCountryCode = chosen) }
+                    activeDialog = null
+                },
+                onDismiss = { activeDialog = null }
+            )
+        }
+
         ActiveSettingDialog.DNS_PROVIDER -> {
             SettingOptionPickerDialog(
-                title = "Select DNS Provider",
+                title = "Private DNS",
                 options = DNS_PROVIDER_OPTIONS,
                 selectedValue = settings.dnsMode,
                 onSelect = { chosen ->
@@ -498,7 +692,7 @@ fun SettingsScreen(
                     val joined = xrayLogs.joinToString("\n")
                     if (joined.isNotBlank()) {
                         val cm = context.getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager
-                        cm?.setPrimaryClip(ClipData.newPlainText("Hollow VPN Xray Logs", joined))
+                        cm?.setPrimaryClip(ClipData.newPlainText("Hollow VPN Connection Logs", joined))
                         onShowMessage("Copied ${xrayLogs.size} log line(s)")
                     }
                 },
@@ -521,7 +715,7 @@ fun SettingsScreen(
                 },
                 title = {
                     Text(
-                        text = "Clear cached servers?",
+                        text = "Clear saved servers?",
                         fontFamily = SpaceGroteskFamily,
                         fontWeight = FontWeight.Bold,
                         color = HollowInk

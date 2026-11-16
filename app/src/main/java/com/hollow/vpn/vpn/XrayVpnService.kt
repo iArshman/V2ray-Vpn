@@ -6,6 +6,7 @@ import android.app.NotificationManager
 import android.app.PendingIntent
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.net.ConnectivityManager
 import android.net.VpnService
 import android.os.Build
 import android.os.ParcelFileDescriptor
@@ -16,11 +17,16 @@ import androidx.core.app.NotificationCompat
 import com.hollow.vpn.MainActivity
 import com.hollow.vpn.R
 import com.hollow.vpn.data.ActiveTunnelSnapshot
+import com.hollow.vpn.data.VpnDatabase
 import com.hollow.vpn.data.VpnPreferencesStore
 import go.Seq
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.launch
 import libv2ray.CoreCallbackHandler
 import libv2ray.CoreController
 import libv2ray.Libv2ray
@@ -76,6 +82,23 @@ class XrayVpnService : VpnService() {
     @Volatile
     private var activeIncludeDirectStats = false
 
+    @Volatile
+    private var smartSwitch: SmartSwitch? = null
+
+    @Volatile
+    private var networkMonitor: NetworkMonitor? = null
+
+    @Volatile
+    private var activeHost: String = ""
+
+    @Volatile
+    private var activePort: Int = 443
+
+    @Volatile
+    private var isFailoverInProgress = false
+
+    private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         if (intent?.action == ACTION_DISCONNECT) {
             appendLog("Disconnect requested by user")
@@ -83,6 +106,8 @@ class XrayVpnService : VpnService() {
             clearLastError()
             _isServiceRunning.value = false
             _trafficSnapshot.value = TunnelTrafficSnapshot()
+            HollowTileService.requestTileUpdate(applicationContext)
+            HollowJobScheduler.scheduleCatchUpRefresh(applicationContext)
             enqueueCleanup(expectedGen = gen, stopServiceAfter = true)
             return START_NOT_STICKY
         }
@@ -127,6 +152,14 @@ class XrayVpnService : VpnService() {
         val selectedAppPackages = intent?.getStringArrayListExtra(EXTRA_SELECTED_APP_PACKAGES)?.toSet()
             ?: fallbackSnapshot?.selectedAppPackages
             ?: emptySet()
+        val smartSwitchEnabled = intent?.getBooleanExtra(
+            EXTRA_SMART_SWITCH_ENABLED,
+            fallbackSnapshot?.smartSwitchEnabled ?: false
+        ) ?: (fallbackSnapshot?.smartSwitchEnabled ?: false)
+        val serverSpeedMbps = intent?.getDoubleExtra(
+            EXTRA_SERVER_SPEED_MBPS,
+            fallbackSnapshot?.serverSpeedMbps ?: 0.0
+        ) ?: (fallbackSnapshot?.serverSpeedMbps ?: 0.0)
 
         if (tunMode && prepare(this) != null) {
             fail("VPN permission not granted by Android OS")
@@ -169,7 +202,9 @@ class XrayVpnService : VpnService() {
                     routingMode = routingMode,
                     perAppProxyEnabled = perAppProxyEnabled,
                     bypassSelectedApps = bypassSelectedApps,
-                    selectedAppPackages = selectedAppPackages
+                    selectedAppPackages = selectedAppPackages,
+                    smartSwitchEnabled = smartSwitchEnabled,
+                    serverSpeedMbps = serverSpeedMbps
                 )
             }
         } catch (e: Exception) {
@@ -194,7 +229,9 @@ class XrayVpnService : VpnService() {
         routingMode: String,
         perAppProxyEnabled: Boolean,
         bypassSelectedApps: Boolean,
-        selectedAppPackages: Set<String>
+        selectedAppPackages: Set<String>,
+        smartSwitchEnabled: Boolean,
+        serverSpeedMbps: Double
     ) {
         if (commandGeneration.get() != gen) return
         teardownActiveResources()
@@ -283,15 +320,26 @@ class XrayVpnService : VpnService() {
                     routingMode = routingMode,
                     perAppProxyEnabled = perAppProxyEnabled,
                     bypassSelectedApps = bypassSelectedApps,
-                    selectedAppPackages = selectedAppPackages
+                    selectedAppPackages = selectedAppPackages,
+                    smartSwitchEnabled = smartSwitchEnabled,
+                    serverSpeedMbps = serverSpeedMbps
                 )
             )
 
+            activeHost = host
+            activePort = port
             activeIncludeDirectStats = isDirectOnly
+            smartSwitch = if (smartSwitchEnabled && !isDirectOnly) {
+                SmartSwitch(referenceMbps = serverSpeedMbps)
+            } else {
+                null
+            }
             _lastError.value = null
             _trafficSnapshot.value = TunnelTrafficSnapshot()
             _isServiceRunning.value = true
+            HollowTileService.requestTileUpdate(applicationContext)
             startTrafficStatsPolling(gen, core)
+            startNetworkMonitor(gen)
 
             val verifiedSubtitle = if (tunMode) {
                 if (enableIpv6) "IPv4 + IPv6 · $host" else "Encrypted Tunnel · $host"
@@ -308,6 +356,106 @@ class XrayVpnService : VpnService() {
                 } catch (_: Exception) {
                 }
                 stopSelf()
+            }
+        }
+    }
+
+    private fun startNetworkMonitor(gen: Int) {
+        networkMonitor?.stop()
+        val cm = getSystemService(ConnectivityManager::class.java) ?: return
+        val monitor = NetworkMonitor(cm) { reason ->
+            if (commandGeneration.get() != gen || !_isServiceRunning.value) return@NetworkMonitor
+            appendLog("Network handover detected: $reason")
+            smartSwitch?.resetSamples()
+            VpnPreferencesStore(applicationContext).invalidateBaseline()
+            val core = coreController ?: return@NetworkMonitor
+            val delay = verifyLiveTunnelDelay(core)
+            if (delay > 0L && core.isRunning) {
+                appendLog("Tunnel survived handover (${delay} ms)")
+            } else {
+                appendLog("Tunnel unresponsive after handover — checking reserve")
+                triggerReserveFailover(expectedGen = gen, reason = "Network handover ($reason)")
+            }
+        }
+        networkMonitor = monitor
+        monitor.start()
+    }
+
+    private fun triggerReserveFailover(expectedGen: Int, reason: String) {
+        if (isFailoverInProgress || commandGeneration.get() != expectedGen) return
+        isFailoverInProgress = true
+        serviceScope.launch {
+            try {
+                val dao = VpnDatabase.getInstance(applicationContext).vpnDao()
+                val prefsStore = VpnPreferencesStore(applicationContext)
+                val settings = prefsStore.loadSettings()
+                val all = dao.getAllServersOnce()
+
+                val failedServer = all.firstOrNull { it.host == activeHost && it.port == activePort }
+                if (failedServer != null) {
+                    dao.updateServer(failedServer.copy(failCount = failedServer.failCount + 1, isSelected = false))
+                }
+
+                val candidates = all
+                    .filterNot { it.host == activeHost && it.port == activePort }
+                    .sortedWith(
+                        compareBy<com.hollow.vpn.data.ServerEntity> { it.failCount }
+                            .thenByDescending { it.lastSpeedMbps }
+                            .thenBy { it.protocolTier }
+                            .thenBy { if (it.pingMs > 0) it.pingMs else Int.MAX_VALUE }
+                    )
+
+                val parser = V2RayParserAndFletcher()
+                val hasGeoAssets = GeoAssetManager.hasGeoAssets(applicationContext)
+                var chosen: com.hollow.vpn.data.ServerEntity? = null
+                for (candidate in candidates.take(6)) {
+                    val probe = parser.measureRealXrayDelayOrNull(applicationContext, candidate, settings)
+                    if (probe is XrayProbeResult.Success) {
+                        chosen = candidate.copy(
+                            pingMs = probe.delayMs,
+                            lastAliveAt = System.currentTimeMillis(),
+                            failCount = 0
+                        )
+                        break
+                    }
+                }
+
+                if (chosen == null) {
+                    _serviceNotice.value = "Failover: no working reserve server found ($reason)"
+                    return@launch
+                }
+
+                dao.clearSelection()
+                dao.updateServer(chosen.copy(isSelected = true))
+                val baseJson = chosen.rawConfigJson.ifBlank { parser.generateXrayJsonForServer(chosen) }
+                val runtimeJson = parser.applyRuntimeSettingsToXrayJson(baseJson, settings, hasGeoAssets)
+                val nextGen = commandGeneration.incrementAndGet()
+                appendLog("Smart failover -> ${chosen.countryName} (${chosen.host}:${chosen.port}) [$reason]")
+                _serviceNotice.value = "Switched to ${chosen.countryName} ($reason)"
+
+                worker.execute {
+                    startTunnelInternal(
+                        gen = nextGen,
+                        country = chosen.countryName,
+                        host = chosen.host,
+                        port = chosen.port,
+                        protocol = chosen.protocolCore,
+                        xrayJson = runtimeJson,
+                        tunMode = settings.tunMode,
+                        enableIpv6 = settings.ipv6Enabled,
+                        dnsMode = settings.dnsMode,
+                        routingMode = settings.routingMode,
+                        perAppProxyEnabled = settings.perAppProxyEnabled,
+                        bypassSelectedApps = settings.bypassSelectedApps,
+                        selectedAppPackages = settings.selectedAppPackages,
+                        smartSwitchEnabled = settings.smartSwitchEnabled,
+                        serverSpeedMbps = chosen.lastSpeedMbps
+                    )
+                }
+            } catch (e: Exception) {
+                appendLog("Failover skipped: ${e.message}")
+            } finally {
+                isFailoverInProgress = false
             }
         }
     }
@@ -334,6 +482,16 @@ class XrayVpnService : VpnService() {
                     downloadBytesPerSec = downDelta,
                     elapsedSeconds = prev.elapsedSeconds + 1L
                 )
+
+                val verdict = smartSwitch?.onSample(
+                    upBytesPerSec = upDelta,
+                    downBytesPerSec = downDelta,
+                    nowMillis = System.currentTimeMillis()
+                )
+                if (verdict is SmartSwitch.Verdict.Switch) {
+                    appendLog("Smart Switch triggered: ${verdict.reason}")
+                    triggerReserveFailover(expectedGen = gen, reason = verdict.reason)
+                }
             },
             1L,
             1L,
@@ -380,6 +538,9 @@ class XrayVpnService : VpnService() {
     }
 
     private fun teardownActiveResources() {
+        networkMonitor?.stop()
+        networkMonitor = null
+        smartSwitch = null
         statsTask?.cancel(false)
         statsTask = null
         val coreToStop = coreController
@@ -459,7 +620,7 @@ class XrayVpnService : VpnService() {
                 .copyOf(32),
             Base64.NO_PADDING or Base64.URL_SAFE or Base64.NO_WRAP
         )
-        val assetPath = (getExternalFilesDir("assets") ?: getDir("assets", MODE_PRIVATE)).absolutePath
+        val assetPath = GeoAssetManager.getAssetDirectory(applicationContext).absolutePath
         Libv2ray.initCoreEnv(assetPath, deviceId)
         coreEnvInitialized = true
     }
@@ -477,6 +638,7 @@ class XrayVpnService : VpnService() {
         _isServiceRunning.value = false
         _trafficSnapshot.value = TunnelTrafficSnapshot()
         _lastError.value = message
+        HollowTileService.requestTileUpdate(applicationContext)
     }
 
     override fun onRevoke() {
@@ -485,6 +647,7 @@ class XrayVpnService : VpnService() {
         _isServiceRunning.value = false
         _trafficSnapshot.value = TunnelTrafficSnapshot()
         _lastError.value = "VPN connection was revoked by Android OS"
+        HollowTileService.requestTileUpdate(applicationContext)
         enqueueCleanup(expectedGen = gen, stopServiceAfter = true)
         super.onRevoke()
     }
@@ -493,6 +656,7 @@ class XrayVpnService : VpnService() {
         val gen = commandGeneration.incrementAndGet()
         _isServiceRunning.value = false
         _trafficSnapshot.value = TunnelTrafficSnapshot()
+        HollowTileService.requestTileUpdate(applicationContext)
         enqueueCleanup(expectedGen = gen, stopServiceAfter = false)
         statsScheduler.shutdownNow()
         worker.shutdown()
@@ -598,6 +762,8 @@ class XrayVpnService : VpnService() {
         const val EXTRA_PER_APP_PROXY_ENABLED = "extra_per_app_proxy_enabled"
         const val EXTRA_BYPASS_SELECTED_APPS = "extra_bypass_selected_apps"
         const val EXTRA_SELECTED_APP_PACKAGES = "extra_selected_app_packages"
+        const val EXTRA_SMART_SWITCH_ENABLED = "extra_smart_switch_enabled"
+        const val EXTRA_SERVER_SPEED_MBPS = "extra_server_speed_mbps"
         private const val CHANNEL_ID = "v2ray_vpn_tunnel_channel"
         private const val NOTIFICATION_ID = 2048
         private const val VPN_MTU = 1500
@@ -614,6 +780,8 @@ class XrayVpnService : VpnService() {
         val isServiceRunning: StateFlow<Boolean> = _isServiceRunning.asStateFlow()
         private val _lastError = MutableStateFlow<String?>(null)
         val lastError: StateFlow<String?> = _lastError.asStateFlow()
+        private val _serviceNotice = MutableStateFlow<String?>(null)
+        val serviceNotice: StateFlow<String?> = _serviceNotice.asStateFlow()
         private val _trafficSnapshot = MutableStateFlow(TunnelTrafficSnapshot())
         val trafficSnapshot: StateFlow<TunnelTrafficSnapshot> = _trafficSnapshot.asStateFlow()
         private val _logs = MutableStateFlow<List<String>>(emptyList())
@@ -621,6 +789,10 @@ class XrayVpnService : VpnService() {
 
         fun clearLastError() {
             _lastError.value = null
+        }
+
+        fun clearServiceNotice() {
+            _serviceNotice.value = null
         }
 
         internal fun appendLog(message: String) {
