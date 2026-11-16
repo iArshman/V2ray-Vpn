@@ -117,7 +117,6 @@ private enum class ActiveSettingDialog {
     UPDATE_INTERVAL,
     PROTOCOL,
     ROUTING_MODE,
-    DOMESTIC_REGION,
     DNS_PROVIDER,
     XRAY_LOGS,
     CLEAR_CACHE_CONFIRM
@@ -144,17 +143,9 @@ private val PROTOCOL_OPTIONS = listOf(
 )
 
 private val ROUTING_MODE_OPTIONS = listOf(
-    SettingChoiceOption("Global", "Protect all internet traffic through the VPN", "Protect everything (Recommended)"),
+    SettingChoiceOption("Global", "Send all internet traffic safely through the VPN", "Protect everything (Recommended)"),
     SettingChoiceOption("Bypass LAN", "Keep home Wi‑Fi devices like printers and TVs reachable directly", "Allow local Wi‑Fi devices"),
-    SettingChoiceOption("Bypass LAN & Domestic", "Use direct speed for home-country websites and VPN for blocked sites", "Keep local sites direct"),
-    SettingChoiceOption("Direct Only", "Testing mode — sends traffic directly without VPN", "No VPN (Testing only)")
-)
-
-private val DOMESTIC_REGION_OPTIONS = listOf(
-    SettingChoiceOption("IR", "Keep Iranian websites & banks direct", "Iran (IR)"),
-    SettingChoiceOption("CN", "Keep Chinese websites & apps direct", "China (CN)"),
-    SettingChoiceOption("RU", "Keep Russian websites & apps direct", "Russia (RU)"),
-    SettingChoiceOption("TR", "Keep Turkish websites & apps direct", "Turkey (TR)")
+    SettingChoiceOption("Direct Only", "Diagnostic mode — sends traffic directly without VPN", "No VPN (Testing only)")
 )
 
 private val DNS_PROVIDER_OPTIONS = listOf(
@@ -168,9 +159,8 @@ private val DNS_PROVIDER_OPTIONS = listOf(
 private fun formatRoutingSummary(mode: String): String = when {
     mode.equals("Global", ignoreCase = true) -> "Everything"
     mode.equals("Bypass LAN", ignoreCase = true) -> "Skip Wi‑Fi"
-    mode.contains("Domestic", ignoreCase = true) -> "Smart local"
     mode.contains("Direct", ignoreCase = true) -> "Testing"
-    else -> mode
+    else -> "Everything"
 }
 
 private fun formatDnsSummary(dns: String): String = when {
@@ -182,13 +172,6 @@ private fun formatDnsSummary(dns: String): String = when {
     else -> dns
 }
 
-private fun formatGeoBadge(status: String): String = when {
-    status.startsWith("Installed", ignoreCase = true) ->
-        status.removePrefix("Installed").trim().removeSurrounding("(", ")").ifBlank { "Ready" }
-    status.startsWith("Not downloaded", ignoreCase = true) -> "Optional"
-    else -> status
-}
-
 /**
  * PAGE 6: Hollow Consumer-First Editorial Settings Screen
  */
@@ -197,13 +180,11 @@ fun SettingsScreen(
     settings: AppSettingsState,
     xrayLogs: List<String> = emptyList(),
     serverCount: Int = 0,
-    geoAssetsStatus: String = "Not downloaded (CIDR fallback)",
     onUpdateSettings: ((AppSettingsState) -> AppSettingsState) -> Unit,
     onOpenAddSubscription: () -> Unit,
     onOpenGettingStarted: () -> Unit = {},
     onClearXrayLogs: () -> Unit = {},
     onExportServers: () -> Unit = {},
-    onDownloadGeoAssets: () -> Unit = {},
     onShowMessage: (String) -> Unit = {},
     onClearCache: () -> Unit,
     onBack: () -> Unit
@@ -330,36 +311,49 @@ fun SettingsScreen(
 
             SettingsToggleRow(
                 icon = Icons.Outlined.Apps,
-                title = "Choose which apps use VPN",
-                subtitle = if (settings.perAppProxyEnabled) {
-                    "Only your selected apps are customized below"
-                } else {
-                    "All apps are protected right now"
+                title = "Per-app routing",
+                subtitle = when {
+                    !settings.perAppProxyEnabled -> "All apps use VPN — turn on to skip VPN for chosen apps"
+                    settings.bypassSelectedApps -> "${settings.selectedAppPackages.size} app(s) skip VPN (normal internet)"
+                    else -> "Only ${settings.selectedAppPackages.size} chosen app(s) use VPN"
                 },
                 checked = settings.perAppProxyEnabled,
                 onCheckedChange = { enabled ->
-                    onUpdateSettings { it.copy(perAppProxyEnabled = enabled) }
+                    onUpdateSettings {
+                        it.copy(
+                            perAppProxyEnabled = enabled,
+                            bypassSelectedApps = if (enabled && !it.perAppProxyEnabled) true else it.bypassSelectedApps
+                        )
+                    }
                 },
                 testTag = "switch_per_app_proxy"
             )
+            HorizontalDivider(thickness = 1.dp, color = HollowCreamDivider)
+            SettingsValueNavigationRow(
+                icon = Icons.Outlined.Apps,
+                title = if (!settings.perAppProxyEnabled || settings.bypassSelectedApps) {
+                    "Choose apps to skip VPN"
+                } else {
+                    "Choose apps to use VPN"
+                },
+                subtitle = if (!settings.perAppProxyEnabled || settings.bypassSelectedApps) {
+                    "Selected apps won't use VPN (great for banking apps)"
+                } else {
+                    "All other apps will use your normal internet"
+                },
+                valueText = "${settings.selectedAppPackages.size} apps",
+                onClick = { showPerAppPicker = true },
+                testTag = "row_per_app_selection"
+            )
             if (settings.perAppProxyEnabled) {
-                HorizontalDivider(thickness = 1.dp, color = HollowCreamDivider)
-                SettingsValueNavigationRow(
-                    icon = Icons.Outlined.Apps,
-                    title = "Select apps",
-                    subtitle = "Pick apps to include or exclude",
-                    valueText = "${settings.selectedAppPackages.size} apps",
-                    onClick = { showPerAppPicker = true },
-                    testTag = "row_per_app_selection"
-                )
                 HorizontalDivider(thickness = 1.dp, color = HollowCreamDivider)
                 SettingsToggleRow(
                     icon = Icons.Outlined.SwapHoriz,
-                    title = "Exclude selected apps instead",
-                    subtitle = "Selected apps skip the VPN (great for banking apps)",
-                    checked = settings.bypassSelectedApps,
-                    onCheckedChange = { enabled ->
-                        onUpdateSettings { it.copy(bypassSelectedApps = enabled) }
+                    title = "Only use VPN in chosen apps",
+                    subtitle = "Reverse mode: turn on if you only want VPN inside the apps you picked",
+                    checked = !settings.bypassSelectedApps,
+                    onCheckedChange = { onlyChosen ->
+                        onUpdateSettings { it.copy(bypassSelectedApps = !onlyChosen) }
                     },
                     testTag = "switch_bypass_selected_apps"
                 )
@@ -527,31 +521,10 @@ fun SettingsScreen(
                     SettingsValueNavigationRow(
                         icon = Icons.Rounded.Route,
                         title = "Traffic routing",
-                        subtitle = "Choose whether local or home sites skip VPN",
+                        subtitle = "Choose whether local Wi‑Fi devices skip VPN",
                         valueText = formatRoutingSummary(settings.routingMode),
                         onClick = { activeDialog = ActiveSettingDialog.ROUTING_MODE },
                         testTag = "row_routing_mode"
-                    )
-                    if (settings.routingMode.contains("Domestic", ignoreCase = true)) {
-                        HorizontalDivider(thickness = 1.dp, color = HollowCreamDivider)
-                        SettingsValueNavigationRow(
-                            icon = Icons.Outlined.Language,
-                            title = "Home country",
-                            subtitle = "Country sites kept on normal connection",
-                            valueText = settings.domesticCountryCode,
-                            onClick = { activeDialog = ActiveSettingDialog.DOMESTIC_REGION },
-                            testTag = "row_domestic_region"
-                        )
-                    }
-                    HorizontalDivider(thickness = 1.dp, color = HollowCreamDivider)
-
-                    SettingsValueNavigationRow(
-                        icon = Icons.Outlined.CloudQueue,
-                        title = "Country rules database",
-                        subtitle = "Optional GeoIP & Geosite data for local bypass",
-                        valueText = formatGeoBadge(geoAssetsStatus),
-                        onClick = onDownloadGeoAssets,
-                        testTag = "row_geo_assets"
                     )
                     HorizontalDivider(thickness = 1.dp, color = HollowCreamDivider)
 
@@ -659,19 +632,6 @@ fun SettingsScreen(
             )
         }
 
-        ActiveSettingDialog.DOMESTIC_REGION -> {
-            SettingOptionPickerDialog(
-                title = "Home country",
-                options = DOMESTIC_REGION_OPTIONS,
-                selectedValue = settings.domesticCountryCode,
-                onSelect = { chosen ->
-                    onUpdateSettings { it.copy(domesticCountryCode = chosen) }
-                    activeDialog = null
-                },
-                onDismiss = { activeDialog = null }
-            )
-        }
-
         ActiveSettingDialog.DNS_PROVIDER -> {
             SettingOptionPickerDialog(
                 title = "Private DNS",
@@ -756,8 +716,20 @@ fun SettingsScreen(
     if (showPerAppPicker) {
         PerAppProxyPickerDialog(
             selectedPackages = settings.selectedAppPackages,
+            bypassSelectedApps = !settings.perAppProxyEnabled || settings.bypassSelectedApps,
             onSave = { packages ->
-                onUpdateSettings { it.copy(selectedAppPackages = packages) }
+                onShowMessage(
+                    if (packages.isEmpty()) "Per-app routing disabled (all apps use VPN)"
+                    else "Per-app routing saved for ${packages.size} app(s)"
+                )
+                onUpdateSettings {
+                    val turningOn = !it.perAppProxyEnabled && packages.isNotEmpty()
+                    it.copy(
+                        perAppProxyEnabled = packages.isNotEmpty(),
+                        bypassSelectedApps = if (turningOn) true else it.bypassSelectedApps,
+                        selectedAppPackages = packages
+                    )
+                }
                 showPerAppPicker = false
             },
             onDismiss = { showPerAppPicker = false }
@@ -1039,18 +1011,33 @@ private data class ProxyAppChoice(val packageName: String, val label: String)
 @Composable
 private fun PerAppProxyPickerDialog(
     selectedPackages: Set<String>,
+    bypassSelectedApps: Boolean = true,
     onSave: (Set<String>) -> Unit,
     onDismiss: () -> Unit
 ) {
     val context = LocalContext.current
     val apps = remember(context) {
         val pm = context.packageManager
-        pm.getInstalledApplications(PackageManager.GET_META_DATA)
-            .asSequence()
-            .filter { it.packageName != context.packageName && pm.getLaunchIntentForPackage(it.packageName) != null }
-            .map { ProxyAppChoice(it.packageName, pm.getApplicationLabel(it).toString()) }
-            .sortedBy { it.label.lowercase() }
-            .toList()
+        val discovered = linkedMapOf<String, ProxyAppChoice>()
+        val launcherIntent = Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER)
+        runCatching {
+            pm.queryIntentActivities(launcherIntent, 0).forEach { resolveInfo ->
+                val pkg = resolveInfo.activityInfo?.packageName ?: return@forEach
+                if (pkg == context.packageName) return@forEach
+                val label = resolveInfo.loadLabel(pm)?.toString()?.takeIf { it.isNotBlank() } ?: pkg
+                discovered.putIfAbsent(pkg, ProxyAppChoice(pkg, label))
+            }
+        }
+        runCatching {
+            pm.getInstalledApplications(PackageManager.GET_META_DATA)
+                .asSequence()
+                .filter { it.packageName != context.packageName && pm.getLaunchIntentForPackage(it.packageName) != null }
+                .forEach { appInfo ->
+                    val label = pm.getApplicationLabel(appInfo).toString().ifBlank { appInfo.packageName }
+                    discovered.putIfAbsent(appInfo.packageName, ProxyAppChoice(appInfo.packageName, label))
+                }
+        }
+        discovered.values.sortedBy { it.label.lowercase() }
     }
     var searchQuery by remember { mutableStateOf("") }
     var workingSelection by remember(selectedPackages) { mutableStateOf(selectedPackages) }
@@ -1068,7 +1055,7 @@ private fun PerAppProxyPickerDialog(
         shape = RoundedCornerShape(24.dp),
         title = {
             Text(
-                text = "Choose apps",
+                text = if (bypassSelectedApps) "Apps that skip VPN" else "Apps that use VPN",
                 fontFamily = SpaceGroteskFamily,
                 fontWeight = FontWeight.Bold,
                 color = HollowInk
@@ -1080,6 +1067,16 @@ private fun PerAppProxyPickerDialog(
                     .fillMaxWidth()
                     .height(430.dp)
             ) {
+                Text(
+                    text = if (bypassSelectedApps) {
+                        "Checked apps will use your normal internet without VPN."
+                    } else {
+                        "Only checked apps will go through the VPN."
+                    },
+                    style = MaterialTheme.typography.bodySmall,
+                    color = HollowInkSecondary
+                )
+                Spacer(Modifier.height(10.dp))
                 OutlinedTextField(
                     value = searchQuery,
                     onValueChange = { searchQuery = it },
@@ -1118,6 +1115,20 @@ private fun PerAppProxyPickerDialog(
                         .verticalScroll(rememberScrollState()),
                     verticalArrangement = Arrangement.spacedBy(4.dp)
                 ) {
+                    if (filteredApps.isEmpty()) {
+                        Box(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(vertical = 32.dp),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Text(
+                                text = "No matching apps found",
+                                style = MaterialTheme.typography.bodyMedium,
+                                color = HollowInkSecondary
+                            )
+                        }
+                    }
                     filteredApps.forEach { app ->
                         val checked = app.packageName in workingSelection
                         Surface(

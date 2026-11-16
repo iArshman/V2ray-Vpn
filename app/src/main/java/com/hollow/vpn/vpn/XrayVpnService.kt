@@ -406,7 +406,6 @@ class XrayVpnService : VpnService() {
                     )
 
                 val parser = V2RayParserAndFletcher()
-                val hasGeoAssets = GeoAssetManager.hasGeoAssets(applicationContext)
                 var chosen: com.hollow.vpn.data.ServerEntity? = null
                 for (candidate in candidates.take(6)) {
                     val probe = parser.measureRealXrayDelayOrNull(applicationContext, candidate, settings)
@@ -428,7 +427,7 @@ class XrayVpnService : VpnService() {
                 dao.clearSelection()
                 dao.updateServer(chosen.copy(isSelected = true))
                 val baseJson = chosen.rawConfigJson.ifBlank { parser.generateXrayJsonForServer(chosen) }
-                val runtimeJson = parser.applyRuntimeSettingsToXrayJson(baseJson, settings, hasGeoAssets)
+                val runtimeJson = parser.applyRuntimeSettingsToXrayJson(baseJson, settings)
                 val nextGen = commandGeneration.incrementAndGet()
                 appendLog("Smart failover -> ${chosen.countryName} (${chosen.host}:${chosen.port}) [$reason]")
                 _serviceNotice.value = "Switched to ${chosen.countryName} ($reason)"
@@ -620,7 +619,8 @@ class XrayVpnService : VpnService() {
                 .copyOf(32),
             Base64.NO_PADDING or Base64.URL_SAFE or Base64.NO_WRAP
         )
-        val assetPath = GeoAssetManager.getAssetDirectory(applicationContext).absolutePath
+        val assetPath = (applicationContext.getExternalFilesDir("assets")
+            ?: applicationContext.getDir("assets", MODE_PRIVATE)).absolutePath
         Libv2ray.initCoreEnv(assetPath, deviceId)
         coreEnvInitialized = true
     }

@@ -10,7 +10,6 @@ import com.hollow.vpn.data.ServerFilter
 import com.hollow.vpn.data.SubscriptionEntity
 import com.hollow.vpn.data.VpnDatabase
 import com.hollow.vpn.data.VpnPreferencesStore
-import com.hollow.vpn.vpn.GeoAssetManager
 import com.hollow.vpn.vpn.HollowJobScheduler
 import com.hollow.vpn.vpn.SecurityPolicy
 import com.hollow.vpn.vpn.V2RayParserAndFletcher
@@ -144,9 +143,6 @@ class VpnViewModel(application: Application) : AndroidViewModel(application) {
 
     private val _sharingQrServer = MutableStateFlow<ServerEntity?>(null)
     val sharingQrServer: StateFlow<ServerEntity?> = _sharingQrServer.asStateFlow()
-
-    private val _geoAssetsStatus = MutableStateFlow(GeoAssetManager.getGeoAssetsSummary(application))
-    val geoAssetsStatus: StateFlow<String> = _geoAssetsStatus.asStateFlow()
 
     val allServers: StateFlow<List<ServerEntity>> = dao.observeAllServers()
         .stateIn(
@@ -1238,27 +1234,6 @@ class VpnViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    fun downloadGeoAssets() {
-        viewModelScope.launch {
-            _geoAssetsStatus.value = "Downloading…"
-            val proxyPort = if (_telemetry.value.isConnected && !_settings.value.tunMode) 10808 else null
-            val res = GeoAssetManager.downloadGeoAssets(
-                context = getApplication(),
-                socksProxyPort = proxyPort,
-                onProgress = { step -> _geoAssetsStatus.value = step }
-            )
-            _geoAssetsStatus.value = GeoAssetManager.getGeoAssetsSummary(getApplication())
-            res.fold(
-                onSuccess = {
-                    showMessage("GeoIP & Geosite routing rules installed")
-                },
-                onFailure = { err ->
-                    showMessage("Geo rules download failed: ${err.message ?: "network error"}")
-                }
-            )
-        }
-    }
-
     private fun isDirectServerInput(input: String): Boolean {
         val lower = input.trim().lowercase()
         return lower.startsWith("vmess://") ||
@@ -1275,16 +1250,23 @@ class VpnViewModel(application: Application) : AndroidViewModel(application) {
 
     fun updateSettings(transform: (AppSettingsState) -> AppSettingsState) {
         var subAutoUpdateChanged = false
+        var perAppChanged = false
         var latestSettings = _settings.value
         _settings.update { current ->
             val updated = transform(current)
             subAutoUpdateChanged = updated.subAutoUpdate != current.subAutoUpdate
+            perAppChanged = updated.perAppProxyEnabled != current.perAppProxyEnabled ||
+                updated.bypassSelectedApps != current.bypassSelectedApps ||
+                updated.selectedAppPackages != current.selectedAppPackages
             latestSettings = updated
             prefsStore.saveSettings(updated)
             updated
         }
         if (subAutoUpdateChanged) {
             HollowJobScheduler.schedulePeriodicMaintenance(getApplication(), latestSettings)
+        }
+        if (perAppChanged && (_telemetry.value.isConnected || _telemetry.value.isConnecting)) {
+            showMessage("Per-app routing updated — reconnect VPN to apply")
         }
     }
 
@@ -1361,8 +1343,7 @@ class VpnViewModel(application: Application) : AndroidViewModel(application) {
             val ctx = getApplication<Application>()
             val currentSettings = _settings.value
             val baseJson = server.rawConfigJson.ifBlank { fletcher.generateXrayJsonForServer(server) }
-            val hasGeoAssets = GeoAssetManager.hasGeoAssets(ctx)
-            val xrayJson = fletcher.applyRuntimeSettingsToXrayJson(baseJson, currentSettings, hasGeoAssets)
+            val xrayJson = fletcher.applyRuntimeSettingsToXrayJson(baseJson, currentSettings)
             val intent = Intent(ctx, XrayVpnService::class.java).apply {
                 action = XrayVpnService.ACTION_CONNECT
                 putExtra(XrayVpnService.EXTRA_SERVER_COUNTRY, server.countryName)

@@ -111,7 +111,6 @@ fun HollowVpnApp(
     val activeAddTab by vpnViewModel.activeAddTab.collectAsStateWithLifecycle()
     val inspectingJsonServer by vpnViewModel.inspectingJsonServer.collectAsStateWithLifecycle()
     val sharingQrServer by vpnViewModel.sharingQrServer.collectAsStateWithLifecycle()
-    val geoAssetsStatus by vpnViewModel.geoAssetsStatus.collectAsStateWithLifecycle()
     val xrayLogs by XrayVpnService.logs.collectAsStateWithLifecycle()
 
     val snackbarHostState = remember { SnackbarHostState() }
@@ -442,7 +441,6 @@ fun HollowVpnApp(
                                     settings = settings,
                                     xrayLogs = xrayLogs,
                                     serverCount = allServers.size,
-                                    geoAssetsStatus = geoAssetsStatus,
                                     onUpdateSettings = vpnViewModel::updateSettings,
                                     onOpenAddSubscription = {
                                         vpnViewModel.navigateTo(VpnScreen.ADD_SERVER)
@@ -450,7 +448,6 @@ fun HollowVpnApp(
                                     onOpenGettingStarted = vpnViewModel::reopenGettingStarted,
                                     onClearXrayLogs = vpnViewModel::clearXrayLogs,
                                     onExportServers = exportServersToClipboard,
-                                    onDownloadGeoAssets = vpnViewModel::downloadGeoAssets,
                                     onShowMessage = vpnViewModel::showMessage,
                                     onClearCache = vpnViewModel::clearServerCacheAndReset,
                                     onBack = {
