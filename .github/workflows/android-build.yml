@@ -33,9 +33,6 @@ jobs:
             yes | "$SDK_ROOT/cmdline-tools/latest/bin/sdkmanager" --licenses >/dev/null || true
           fi
 
-      - name: Prepare local environment template
-        run: cp .env.example .env
-
       - name: Run unit tests
         run: |
           chmod +x ./gradlew
