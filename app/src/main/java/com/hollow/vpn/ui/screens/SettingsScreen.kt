@@ -66,7 +66,15 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.foundation.Canvas
+import androidx.compose.material.icons.outlined.SystemUpdate
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.unit.Dp
+import com.hollow.vpn.BuildConfig
 import com.hollow.vpn.data.AppSettingsState
+import com.hollow.vpn.data.AppUpdateState
+import com.hollow.vpn.ui.components.HollowBrandShieldLogo
 import com.hollow.vpn.ui.components.HollowSwitch
 import com.hollow.vpn.ui.components.HollowTopSquareButton
 import com.hollow.vpn.ui.theme.HollowCream
@@ -74,6 +82,7 @@ import com.hollow.vpn.ui.theme.HollowCreamDivider
 import com.hollow.vpn.ui.theme.HollowCreamSurface
 import com.hollow.vpn.ui.theme.HollowInk
 import com.hollow.vpn.ui.theme.HollowInkSecondary
+import com.hollow.vpn.ui.theme.HollowLime
 import com.hollow.vpn.ui.theme.HollowOrange
 import com.hollow.vpn.ui.theme.JetBrainsMonoFamily
 import com.hollow.vpn.ui.theme.SpaceGroteskFamily
@@ -83,7 +92,9 @@ private enum class ActiveSettingDialog {
     PROTOCOL,
     ROUTING_MODE,
     DNS_PROVIDER,
-    XRAY_LOGS
+    XRAY_LOGS,
+    ABOUT,
+    CHECK_UPDATE
 }
 
 private val PROTOCOL_OPTIONS = listOf(
@@ -135,11 +146,14 @@ fun SettingsScreen(
     settings: AppSettingsState,
     xrayLogs: List<String> = emptyList(),
     serverCount: Int = 0,
+    appUpdateState: AppUpdateState = AppUpdateState.Idle,
+    bottomContentPadding: Dp = 0.dp,
     onUpdateSettings: ((AppSettingsState) -> AppSettingsState) -> Unit,
     onOpenAddSubscription: () -> Unit,
     onOpenGettingStarted: () -> Unit = {},
     onClearXrayLogs: () -> Unit = {},
     onExportServers: () -> Unit = {},
+    onCheckForUpdates: () -> Unit = {},
     onShowMessage: (String) -> Unit = {},
     onBack: () -> Unit
 ) {
@@ -442,7 +456,143 @@ fun SettingsScreen(
                 testTag = "row_export_servers"
             )
 
-            Spacer(modifier = Modifier.height(32.dp))
+            Spacer(modifier = Modifier.height(28.dp))
+
+            // 7. UPDATES & ABOUT
+            SettingsSectionHeader(title = "ABOUT")
+
+            val updateSubtitle = when (appUpdateState) {
+                AppUpdateState.Idle -> "Check GitHub Releases for newer builds"
+                AppUpdateState.Checking -> "Checking for latest release…"
+                is AppUpdateState.UpToDate -> "Up to date · ${appUpdateState.latestVersion}"
+                is AppUpdateState.UpdateAvailable -> "New version ${appUpdateState.latestVersion} available"
+                is AppUpdateState.Error -> "Could not check — tap to retry"
+            }
+            val updateBadge = when (appUpdateState) {
+                AppUpdateState.Idle -> "Check"
+                AppUpdateState.Checking -> "Checking"
+                is AppUpdateState.UpToDate -> "Latest"
+                is AppUpdateState.UpdateAvailable -> appUpdateState.latestVersion
+                is AppUpdateState.Error -> "Retry"
+            }
+
+            SettingsValueNavigationRow(
+                icon = Icons.Outlined.SystemUpdate,
+                title = "Check for updates",
+                subtitle = updateSubtitle,
+                valueText = updateBadge,
+                onClick = {
+                    activeDialog = ActiveSettingDialog.CHECK_UPDATE
+                    onCheckForUpdates()
+                },
+                testTag = "row_check_updates"
+            )
+
+            Spacer(modifier = Modifier.height(14.dp))
+
+            Surface(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(22.dp))
+                    .clickable(role = Role.Button) { activeDialog = ActiveSettingDialog.ABOUT }
+                    .testTag("card_about_hollow"),
+                shape = RoundedCornerShape(22.dp),
+                color = HollowInk
+            ) {
+                Box(modifier = Modifier.fillMaxWidth()) {
+                    Canvas(modifier = Modifier.matchParentSize()) {
+                        val center = Offset(size.width * 0.88f, size.height * 0.24f)
+                        drawCircle(
+                            color = HollowOrange.copy(alpha = 0.14f),
+                            radius = 58.dp.toPx(),
+                            center = center,
+                            style = Stroke(width = 1.dp.toPx())
+                        )
+                        drawCircle(
+                            color = HollowLime.copy(alpha = 0.08f),
+                            radius = 92.dp.toPx(),
+                            center = center,
+                            style = Stroke(width = 1.dp.toPx())
+                        )
+                    }
+
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(18.dp)
+                    ) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(12.dp)
+                        ) {
+                            Box(
+                                modifier = Modifier
+                                    .size(46.dp)
+                                    .clip(RoundedCornerShape(13.dp))
+                                    .background(Color(0xFF23221E)),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                HollowBrandShieldLogo(
+                                    strokeColor = HollowCream,
+                                    modifier = Modifier.size(26.dp)
+                                )
+                            }
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(
+                                    text = "Hollow VPN",
+                                    fontFamily = SpaceGroteskFamily,
+                                    fontWeight = FontWeight.Bold,
+                                    fontSize = 19.sp,
+                                    color = HollowCream
+                                )
+                                Text(
+                                    text = "Private Xray Multi-Protocol Tunnel",
+                                    style = MaterialTheme.typography.bodySmall.copy(fontSize = 12.sp),
+                                    color = Color(0xFFA7A298),
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
+                                )
+                            }
+                            Surface(
+                                shape = RoundedCornerShape(50),
+                                color = HollowOrange
+                            ) {
+                                Text(
+                                    text = "v${BuildConfig.VERSION_NAME}",
+                                    fontFamily = JetBrainsMonoFamily,
+                                    fontWeight = FontWeight.Bold,
+                                    fontSize = 11.sp,
+                                    color = Color.White,
+                                    modifier = Modifier.padding(horizontal = 9.dp, vertical = 4.dp)
+                                )
+                            }
+                        }
+
+                        Spacer(modifier = Modifier.height(14.dp))
+                        HorizontalDivider(thickness = 1.dp, color = Color(0xFF2C2B27))
+                        Spacer(modifier = Modifier.height(12.dp))
+
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            AboutCardStat(label = "ENGINE", value = "Xray Core")
+                            AboutCardStat(label = "BUILD", value = "#${BuildConfig.VERSION_CODE}")
+                            AboutCardStat(label = "PROTOCOLS", value = "Reality · HY2")
+                            Icon(
+                                imageVector = Icons.AutoMirrored.Rounded.KeyboardArrowRight,
+                                contentDescription = "Open About Hollow",
+                                tint = Color(0xFFA7A298),
+                                modifier = Modifier.size(20.dp)
+                            )
+                        }
+                    }
+                }
+            }
+
+            Spacer(modifier = Modifier.height(24.dp + bottomContentPadding))
             Spacer(modifier = Modifier.navigationBarsPadding())
         }
     }
@@ -514,6 +664,25 @@ fun SettingsScreen(
                     }
                 },
                 onClearLogs = onClearXrayLogs,
+                onDismiss = { activeDialog = null }
+            )
+        }
+
+        ActiveSettingDialog.ABOUT -> {
+            AboutHollowSheet(
+                onCopyBuildInfo = onShowMessage,
+                onCheckUpdates = {
+                    activeDialog = ActiveSettingDialog.CHECK_UPDATE
+                    onCheckForUpdates()
+                },
+                onDismiss = { activeDialog = null }
+            )
+        }
+
+        ActiveSettingDialog.CHECK_UPDATE -> {
+            AppUpdateCheckDialog(
+                updateState = appUpdateState,
+                onRetry = onCheckForUpdates,
                 onDismiss = { activeDialog = null }
             )
         }
@@ -768,5 +937,30 @@ private fun InlineModeSegment(
                 color = if (selected) HollowCream else HollowInkSecondary
             )
         }
+    }
+}
+
+@Composable
+private fun AboutCardStat(
+    label: String,
+    value: String
+) {
+    Column {
+        Text(
+            text = label,
+            fontFamily = JetBrainsMonoFamily,
+            fontWeight = FontWeight.Medium,
+            fontSize = 9.5.sp,
+            letterSpacing = 1.sp,
+            color = Color(0xFF9C978E)
+        )
+        Spacer(modifier = Modifier.height(3.dp))
+        Text(
+            text = value,
+            fontFamily = JetBrainsMonoFamily,
+            fontWeight = FontWeight.SemiBold,
+            fontSize = 12.5.sp,
+            color = HollowCream
+        )
     }
 }

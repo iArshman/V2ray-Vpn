@@ -52,6 +52,7 @@ import androidx.core.content.ContextCompat
 import androidx.core.view.WindowCompat
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
+import com.hollow.vpn.ui.AddServerTab
 import com.hollow.vpn.ui.VpnScreen
 import com.hollow.vpn.ui.VpnViewModel
 import com.hollow.vpn.ui.components.HollowBottomNavigationBar
@@ -111,6 +112,7 @@ fun HollowVpnApp(
     val activeAddTab by vpnViewModel.activeAddTab.collectAsStateWithLifecycle()
     val inspectingJsonServer by vpnViewModel.inspectingJsonServer.collectAsStateWithLifecycle()
     val sharingQrServer by vpnViewModel.sharingQrServer.collectAsStateWithLifecycle()
+    val appUpdateState by vpnViewModel.appUpdateState.collectAsStateWithLifecycle()
     val xrayLogs by XrayVpnService.logs.collectAsStateWithLifecycle()
 
     val snackbarHostState = remember { SnackbarHostState() }
@@ -397,6 +399,10 @@ fun HollowVpnApp(
                                     onOpenAddServer = {
                                         vpnViewModel.navigateTo(VpnScreen.ADD_SERVER)
                                     },
+                                    onOpenAddManualServer = {
+                                        vpnViewModel.setAddServerTab(AddServerTab.MANUAL)
+                                        vpnViewModel.navigateTo(VpnScreen.ADD_SERVER)
+                                    },
                                     onPingServer = vpnViewModel::pingSingleServer,
                                     onRepingAll = vpnViewModel::repingAllSavedServers,
                                     onShowMessage = vpnViewModel::showMessage,
@@ -441,6 +447,8 @@ fun HollowVpnApp(
                                     settings = settings,
                                     xrayLogs = xrayLogs,
                                     serverCount = allServers.size,
+                                    appUpdateState = appUpdateState,
+                                    bottomContentPadding = innerPadding.calculateBottomPadding(),
                                     onUpdateSettings = vpnViewModel::updateSettings,
                                     onOpenAddSubscription = {
                                         vpnViewModel.navigateTo(VpnScreen.ADD_SERVER)
@@ -448,6 +456,7 @@ fun HollowVpnApp(
                                     onOpenGettingStarted = vpnViewModel::reopenGettingStarted,
                                     onClearXrayLogs = vpnViewModel::clearXrayLogs,
                                     onExportServers = exportServersToClipboard,
+                                    onCheckForUpdates = vpnViewModel::checkForAppUpdates,
                                     onShowMessage = vpnViewModel::showMessage,
                                     onBack = {
                                         if (!vpnViewModel.navigateBack()) {

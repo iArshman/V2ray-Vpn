@@ -60,9 +60,29 @@ data class SubscriptionEntity(
 enum class ServerFilter(val label: String) {
     FASTEST("Fastest"),
     ALL("All"),
-    RECOMMENDED("Recommended"),
     LOW_PING("Low Ping"),
+    CUSTOM("Custom"),
+    RECOMMENDED("Recommended"),
     HIGH_SPEED("High Speed")
+}
+
+sealed interface AppUpdateState {
+    data object Idle : AppUpdateState
+    data object Checking : AppUpdateState
+    data class UpToDate(
+        val currentVersion: String,
+        val latestVersion: String,
+        val checkedAtMillis: Long = System.currentTimeMillis(),
+        val releaseUrl: String = "https://github.com/irexanon/V2ray/releases"
+    ) : AppUpdateState
+    data class UpdateAvailable(
+        val currentVersion: String,
+        val latestVersion: String,
+        val releaseNotes: String,
+        val releaseUrl: String,
+        val apkDownloadUrl: String? = null
+    ) : AppUpdateState
+    data class Error(val message: String) : AppUpdateState
 }
 
 data class AppSettingsState(

@@ -19,7 +19,7 @@ android {
   compileSdk { version = release(36) { minorApiLevel = 1 } }
 
   defaultConfig {
-    applicationId = "com.hollow.vpn.lcwsbx"
+    applicationId = "com.hllow.vpn.snow"
     minSdk = 24
     targetSdk = 36
     // Release artifacts are split like v2rayNG: 32-bit ARM, 64-bit ARM, and universal ARM.

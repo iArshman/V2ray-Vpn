@@ -99,6 +99,7 @@ fun CountryServerListScreen(
     onRefresh: () -> Unit,
     onOpenSettings: () -> Unit,
     onOpenAddServer: () -> Unit,
+    onOpenAddManualServer: () -> Unit = onOpenAddServer,
     onPingServer: (ServerEntity) -> Unit,
     onRepingAll: () -> Unit = {},
     onShowMessage: (String) -> Unit = {},
@@ -158,7 +159,8 @@ fun CountryServerListScreen(
         listOf(
             ServerFilter.FASTEST to "Fastest",
             ServerFilter.ALL to "All",
-            ServerFilter.LOW_PING to "Low ping"
+            ServerFilter.LOW_PING to "Low ping",
+            ServerFilter.CUSTOM to "Custom"
         )
     }
     val selectedTabIndex = tabs.indexOfFirst { it.first == selectedFilter }.let { if (it >= 0) it else 0 }
@@ -338,12 +340,14 @@ fun CountryServerListScreen(
 
             Spacer(modifier = Modifier.height(16.dp))
 
-            // Page 4 Underlined Filter Tabs (All, Recommended, Low ping)
+            // Page 4 Underlined Filter Tabs (Fastest, All, Low ping, Custom)
             HollowUnderlinedTabRow(
                 tabs = tabs.map { it.second },
                 selectedIndex = selectedTabIndex,
                 onSelectTab = { idx -> onSelectFilter(tabs[idx].first) },
-                tabTestTags = tabs.map { "country_filter_${it.first.name.lowercase()}" }
+                tabTestTags = tabs.map { "country_filter_${it.first.name.lowercase()}" },
+                tabFontSize = 14.sp,
+                tabSpacing = 20.dp
             )
 
             if (activeProtocolPreference != "Auto (V2Ray)") {
@@ -434,6 +438,7 @@ fun CountryServerListScreen(
                 contentPadding = PaddingValues(bottom = 24.dp)
             ) {
                 val isFastestTab = selectedFilter == ServerFilter.FASTEST
+                val isCustomTab = selectedFilter == ServerFilter.CUSTOM
 
                 // Dark FASTEST Hero Card (shown ONLY on the Fastest tab)
                 if (isFastestTab && fastestNode != null) {
@@ -521,7 +526,11 @@ fun CountryServerListScreen(
                     }
                 }
 
-                val isEmpty = if (isFastestTab) topFastestServers.isEmpty() else orderedGroups.isEmpty()
+                val isEmpty = when {
+                    isFastestTab -> topFastestServers.isEmpty()
+                    isCustomTab -> displayedServers.isEmpty()
+                    else -> orderedGroups.isEmpty()
+                }
                 if (isEmpty) {
                     item(key = "empty_state") {
                         Surface(
@@ -545,16 +554,19 @@ fun CountryServerListScreen(
                                     modifier = Modifier.size(30.dp)
                                 )
                                 Text(
-                                    text = "No matching servers",
+                                    text = if (isCustomTab) "No custom servers" else "No matching servers",
                                     fontFamily = SpaceGroteskFamily,
                                     fontWeight = FontWeight.Bold,
                                     fontSize = 18.sp,
                                     color = HollowInk
                                 )
-                                val emptyMsg = if (activeProtocolPreference != "Auto (V2Ray)") {
-                                    "No servers match \"${formatConsumerProtocol(activeProtocolPreference)}\". Reset to Auto or add a server."
-                                } else {
-                                    "Import a subscription link, server config, or QR code to populate servers."
+                                val emptyMsg = when {
+                                    activeProtocolPreference != "Auto (V2Ray)" ->
+                                        "No servers match \"${formatConsumerProtocol(activeProtocolPreference)}\". Reset to Auto or add a server."
+                                    isCustomTab ->
+                                        "Manually added servers, pasted config keys, and scanned QR nodes will show up here."
+                                    else ->
+                                        "Import a subscription link, server config, or QR code to populate servers."
                                 }
                                 Text(
                                     text = emptyMsg,
@@ -569,7 +581,7 @@ fun CountryServerListScreen(
                                         }
                                     }
                                     Button(
-                                        onClick = onOpenAddServer,
+                                        onClick = if (isCustomTab) onOpenAddManualServer else onOpenAddServer,
                                         shape = RoundedCornerShape(14.dp),
                                         colors = ButtonDefaults.buttonColors(
                                             containerColor = HollowInk,
@@ -577,7 +589,7 @@ fun CountryServerListScreen(
                                         ),
                                         modifier = Modifier.testTag("empty_add_server_button")
                                     ) {
-                                        Text("Add server")
+                                        Text(if (isCustomTab) "Add custom server" else "Add server")
                                     }
                                 }
                             }
@@ -585,7 +597,69 @@ fun CountryServerListScreen(
                     }
                 }
 
-                if (isFastestTab && topFastestServers.isNotEmpty()) {
+                if (isCustomTab && displayedServers.isNotEmpty()) {
+                    item(key = "custom_list_header") {
+                        Text(
+                            text = "CUSTOM SERVERS · ${displayedServers.size}",
+                            fontFamily = JetBrainsMonoFamily,
+                            fontWeight = FontWeight.SemiBold,
+                            fontSize = 11.sp,
+                            letterSpacing = 1.4.sp,
+                            color = HollowInkSecondary,
+                            modifier = Modifier.padding(bottom = 8.dp)
+                        )
+                    }
+                    item(key = "custom_flat_list") {
+                        Column(modifier = Modifier.fillMaxWidth()) {
+                            displayedServers.forEachIndexed { idx, server ->
+                                val isChecked = server.id in selectedIds
+                                Box(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .clickable {
+                                            if (isSelectionMode) {
+                                                selectedIds = if (isChecked) {
+                                                    selectedIds - server.id
+                                                } else {
+                                                    selectedIds + server.id
+                                                }
+                                            } else {
+                                                onSelectServer(server)
+                                            }
+                                        }
+                                        .testTag("custom_server_${server.id}")
+                                ) {
+                                    ServerItemRowContent(
+                                        server = server,
+                                        showLightningBadge = server.isSelected,
+                                        onSelect = { onSelectServer(server) },
+                                        onPing = { onPingServer(server) },
+                                        onInspectJson = { onInspectJson(server) },
+                                        onDelete = { onDeleteServer(server) },
+                                        onCopyFeedback = onShowMessage,
+                                        onShareQr = { onShareQr(server) },
+                                        isSelectionMode = isSelectionMode,
+                                        isCheckedForBatch = isChecked,
+                                        onToggleBatchCheck = {
+                                            selectedIds = if (isChecked) {
+                                                selectedIds - server.id
+                                            } else {
+                                                selectedIds + server.id
+                                            }
+                                        },
+                                        showCountryBadge = true
+                                    )
+                                }
+                                if (idx < displayedServers.lastIndex) {
+                                    HorizontalDivider(
+                                        thickness = 1.dp,
+                                        color = HollowCreamDivider
+                                    )
+                                }
+                            }
+                        }
+                    }
+                } else if (isFastestTab && topFastestServers.isNotEmpty()) {
                     item(key = "fastest_list_header") {
                         Text(
                             text = "TOP ${topFastestServers.size} FASTEST",

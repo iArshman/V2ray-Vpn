@@ -4,6 +4,7 @@ import android.content.Context
 import android.provider.Settings
 import android.util.Base64
 import com.hollow.vpn.data.AppSettingsState
+import com.hollow.vpn.data.AppUpdateState
 import com.hollow.vpn.data.ServerEntity
 import go.Seq
 import kotlinx.coroutines.Dispatchers
@@ -623,6 +624,101 @@ class V2RayParserAndFletcher {
         }
 
         PublicIpInfo("Unavailable", "Unknown", "XX", "Unavailable")
+    }
+
+    /**
+     * Checks live GitHub Releases / Tags for a newer Hollow VPN build without crashing if no release exists yet.
+     */
+    suspend fun checkAppUpdate(currentVersion: String): AppUpdateState = withContext(Dispatchers.IO) {
+        val cleanCurrent = currentVersion.trim().ifBlank { "1.0" }
+        try {
+            val releaseReq = Request.Builder()
+                .url("https://api.github.com/repos/irexanon/V2ray/releases/latest")
+                .header("Accept", "application/vnd.github+json")
+                .header("User-Agent", "HollowVPN/$cleanCurrent")
+                .build()
+            httpClient.newCall(releaseReq).execute().use { resp ->
+                if (resp.isSuccessful) {
+                    val json = JSONObject(resp.body?.string().orEmpty())
+                    val tagName = json.optString("tag_name", "").trim()
+                    val htmlUrl = json.optString("html_url", "https://github.com/irexanon/V2ray/releases")
+                    val body = json.optString("body", "").trim()
+                    val assets = json.optJSONArray("assets")
+                    var apkUrl: String? = null
+                    if (assets != null) {
+                        for (i in 0 until assets.length()) {
+                            val asset = assets.optJSONObject(i) ?: continue
+                            val name = asset.optString("name", "")
+                            val dl = asset.optString("browser_download_url", "")
+                            if (name.endsWith(".apk", ignoreCase = true) && dl.isNotBlank()) {
+                                apkUrl = dl
+                                break
+                            }
+                        }
+                    }
+                    if (tagName.isNotBlank()) {
+                        return@withContext if (compareSemVer(tagName, cleanCurrent) > 0) {
+                            AppUpdateState.UpdateAvailable(
+                                currentVersion = cleanCurrent,
+                                latestVersion = tagName,
+                                releaseNotes = body.ifBlank { "New build $tagName is available." },
+                                releaseUrl = htmlUrl,
+                                apkDownloadUrl = apkUrl
+                            )
+                        } else {
+                            AppUpdateState.UpToDate(
+                                currentVersion = cleanCurrent,
+                                latestVersion = tagName,
+                                releaseUrl = htmlUrl
+                            )
+                        }
+                    }
+                } else if (resp.code == 404) {
+                    // Fallback to repository tags if no formal GitHub Release has been published yet
+                    val tagsReq = Request.Builder()
+                        .url("https://api.github.com/repos/irexanon/V2ray/tags?per_page=1")
+                        .header("Accept", "application/vnd.github+json")
+                        .header("User-Agent", "HollowVPN/$cleanCurrent")
+                        .build()
+                    httpClient.newCall(tagsReq).execute().use { tagResp ->
+                        if (tagResp.isSuccessful) {
+                            val arr = JSONArray(tagResp.body?.string().orEmpty())
+                            val firstTag = arr.optJSONObject(0)?.optString("name", "")?.trim().orEmpty()
+                            if (firstTag.isNotBlank() && compareSemVer(firstTag, cleanCurrent) > 0) {
+                                return@withContext AppUpdateState.UpdateAvailable(
+                                    currentVersion = cleanCurrent,
+                                    latestVersion = firstTag,
+                                    releaseNotes = "New tag $firstTag published on repository.",
+                                    releaseUrl = "https://github.com/irexanon/V2ray/releases"
+                                )
+                            }
+                            return@withContext AppUpdateState.UpToDate(
+                                currentVersion = cleanCurrent,
+                                latestVersion = firstTag.ifBlank { "v$cleanCurrent" },
+                                releaseUrl = "https://github.com/irexanon/V2ray/releases"
+                            )
+                        }
+                    }
+                }
+                AppUpdateState.Error("Update server returned HTTP ${resp.code}. Please try again later.")
+            }
+        } catch (e: Exception) {
+            AppUpdateState.Error("Unable to reach update server. Check your internet connection and retry.")
+        }
+    }
+
+    private fun compareSemVer(remote: String, local: String): Int {
+        val rParts = remote.trim().removePrefix("v").removePrefix("V")
+            .substringBefore("-").split(".").map { it.filter(Char::isDigit).toIntOrNull() ?: 0 }
+        val lParts = local.trim().removePrefix("v").removePrefix("V")
+            .substringBefore("-").split(".").map { it.filter(Char::isDigit).toIntOrNull() ?: 0 }
+        val len = maxOf(rParts.size, lParts.size)
+        for (i in 0 until len) {
+            val r = rParts.getOrElse(i) { 0 }
+            val l = lParts.getOrElse(i) { 0 }
+            if (r != l) return r.compareTo(l)
+        }
+        return 0
     }
 
     /**

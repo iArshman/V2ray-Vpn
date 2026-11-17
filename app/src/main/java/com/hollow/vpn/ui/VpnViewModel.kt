@@ -4,7 +4,9 @@ import android.app.Application
 import android.content.Intent
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
+import com.hollow.vpn.BuildConfig
 import com.hollow.vpn.data.AppSettingsState
+import com.hollow.vpn.data.AppUpdateState
 import com.hollow.vpn.data.ServerEntity
 import com.hollow.vpn.data.ServerFilter
 import com.hollow.vpn.data.SubscriptionEntity
@@ -145,6 +147,9 @@ class VpnViewModel(application: Application) : AndroidViewModel(application) {
     private val _sharingQrServer = MutableStateFlow<ServerEntity?>(null)
     val sharingQrServer: StateFlow<ServerEntity?> = _sharingQrServer.asStateFlow()
 
+    private val _appUpdateState = MutableStateFlow<AppUpdateState>(AppUpdateState.Idle)
+    val appUpdateState: StateFlow<AppUpdateState> = _appUpdateState.asStateFlow()
+
     val allServers: StateFlow<List<ServerEntity>> = dao.observeAllServers()
         .stateIn(
             scope = viewModelScope,
@@ -189,6 +194,12 @@ class VpnViewModel(application: Application) : AndroidViewModel(application) {
                         it.transport.equals("WebSocket", ignoreCase = true) ||
                         it.transport.equals("Hysteria2", ignoreCase = true)
                 }.sortedBy { if (it.pingMs > 0) it.pingMs else Int.MAX_VALUE }.take(15)
+            }
+            ServerFilter.CUSTOM -> {
+                protocolFiltered.filter { it.isCustom }.sortedWith(
+                    compareByDescending<ServerEntity> { it.isSelected }
+                        .thenBy { if (it.pingMs > 0) it.pingMs else Int.MAX_VALUE }
+                )
             }
         }
     }.stateIn(
@@ -597,6 +608,14 @@ class VpnViewModel(application: Application) : AndroidViewModel(application) {
         _selectedFilter.value = filter
     }
 
+    fun checkForAppUpdates() {
+        if (_appUpdateState.value is AppUpdateState.Checking) return
+        viewModelScope.launch {
+            _appUpdateState.value = AppUpdateState.Checking
+            _appUpdateState.value = fletcher.checkAppUpdate(BuildConfig.VERSION_NAME)
+        }
+    }
+
     fun setAddServerTab(tab: AddServerTab) {
         _activeAddTab.value = tab
     }
@@ -979,8 +998,9 @@ class VpnViewModel(application: Application) : AndroidViewModel(application) {
                     return@launch
                 }
                 dao.clearSelection()
-                val verified = candidate.copy(pingMs = verifiedPing, isSelected = true)
+                val verified = candidate.copy(pingMs = verifiedPing, isSelected = true, isCustom = true)
                 dao.insertServer(verified)
+                _selectedFilter.value = ServerFilter.CUSTOM
                 navigateTo(VpnScreen.SERVER_LIST)
                 showMessage("Added custom server (${verified.countryName} · $verifiedPing ms)")
                 return@launch
@@ -1047,12 +1067,13 @@ class VpnViewModel(application: Application) : AndroidViewModel(application) {
                 rank = 1
             )
             val finalServer = if (countryName.trim().isNotBlank()) {
-                enriched.copy(countryName = countryName.trim(), rawConfigJson = generatedJson)
+                enriched.copy(countryName = countryName.trim(), rawConfigJson = generatedJson, isCustom = true)
             } else {
-                enriched.copy(rawConfigJson = generatedJson)
+                enriched.copy(rawConfigJson = generatedJson, isCustom = true)
             }
             dao.clearSelection()
             dao.insertServer(finalServer)
+            _selectedFilter.value = ServerFilter.CUSTOM
             navigateTo(VpnScreen.SERVER_LIST)
             showMessage("Added ${finalServer.countryName} · ${finalServer.resolvedIp} ($verifiedPing ms)")
         }
