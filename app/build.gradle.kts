@@ -1,4 +1,3 @@
-import com.google.gms.googleservices.GoogleServicesPlugin.MissingGoogleServicesStrategy
 import java.net.HttpURLConnection
 import java.net.URI
 
@@ -6,8 +5,6 @@ plugins {
   alias(libs.plugins.android.application)
   alias(libs.plugins.kotlin.compose)
   alias(libs.plugins.google.devtools.ksp)
-  alias(libs.plugins.secrets)
-  alias(libs.plugins.google.services)
 }
 
 val isReleaseOrBundleTask = gradle.startParameter.taskNames.any {
@@ -110,14 +107,6 @@ android {
     includeInBundle = true
   }
 }
-
-secrets {
-  propertiesFileName = ".env"
-  defaultPropertiesFileName = ".env.example"
-  ignoreList.add("FIREBASE_APPCHECK_DEBUG_TOKEN")
-}
-
-googleServices { missingGoogleServicesStrategy = MissingGoogleServicesStrategy.WARN }
 
 val libV2rayFile = layout.projectDirectory.file("libs/libv2ray.aar").asFile
 if (!libV2rayFile.exists() || libV2rayFile.length() < 1024L) {
