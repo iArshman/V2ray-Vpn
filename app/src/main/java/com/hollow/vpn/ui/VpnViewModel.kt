@@ -439,7 +439,7 @@ class VpnViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun reopenGettingStarted() {
-        _gettingStartedStep.value = 0
+        _gettingStartedStep.value = if (_settings.value.hasCompletedOnboarding) 2 else 0
         navigateTo(VpnScreen.GETTING_STARTED)
     }
 

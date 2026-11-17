@@ -50,7 +50,13 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.KeyboardArrowRight
+import androidx.compose.material.icons.automirrored.rounded.OpenInNew
+import androidx.compose.material.icons.outlined.BatteryChargingFull
+import androidx.compose.material.icons.outlined.CameraAlt
 import androidx.compose.material.icons.outlined.ContentPaste
+import androidx.compose.material.icons.outlined.Lock
+import androidx.compose.material.icons.outlined.NotificationsActive
+import androidx.compose.material.icons.outlined.Shield
 import androidx.compose.material.icons.rounded.Check
 import androidx.compose.material.icons.rounded.Link
 import androidx.compose.material.icons.rounded.QrCodeScanner
@@ -229,7 +235,7 @@ fun GettingStartedScreen(
                             serverCount = serverCount,
                             onShowMessage = onShowMessage,
                             onAllowAndContinue = {
-                                onFinish(serverCount > 0)
+                                onFinish(!settings.hasCompletedOnboarding && serverCount > 0)
                             }
                         )
                     }
@@ -649,8 +655,16 @@ private fun GettingStartedPermissionsStep(
     onAllowAndContinue: () -> Unit
 ) {
     val context = LocalContext.current
+    val prefs = remember(context) {
+        context.applicationContext.getSharedPreferences("v2ray_vpn_prefs", Context.MODE_PRIVATE)
+    }
     var refreshTick by remember { mutableIntStateOf(0) }
     var pendingCompleteAfterVpnConsent by remember { mutableStateOf(false) }
+    var showKillSwitchGuide by remember { mutableStateOf(false) }
+    var showBatteryGuide by remember { mutableStateOf(false) }
+    var killSwitchConfirmed by remember {
+        mutableStateOf(prefs.getBoolean("kill_switch_guide_confirmed", false))
+    }
 
     LifecycleEventEffect(Lifecycle.Event.ON_RESUME) {
         refreshTick++
@@ -680,6 +694,25 @@ private fun GettingStartedPermissionsStep(
         pm?.isIgnoringBatteryOptimizations(context.packageName) == true
     }
 
+    val isCameraGranted = remember(refreshTick) {
+        ContextCompat.checkSelfPermission(
+            context,
+            Manifest.permission.CAMERA
+        ) == PackageManager.PERMISSION_GRANTED
+    }
+
+    val openAppDetailsSettings = {
+        val appInfoIntent = Intent(
+            Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
+            Uri.fromParts("package", context.packageName, null)
+        )
+        try {
+            context.startActivity(appInfoIntent)
+        } catch (_: Exception) {
+            onShowMessage("Open Android Settings -> Apps -> Hollow VPN")
+        }
+    }
+
     val vpnPermissionLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.StartActivityForResult()
     ) { result ->
@@ -697,8 +730,39 @@ private fun GettingStartedPermissionsStep(
 
     val notificationPermissionLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.RequestPermission()
-    ) {
+    ) { granted ->
         refreshTick++
+        if (!granted && Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            val activity = context as? Activity
+            val canAskAgain = activity?.shouldShowRequestPermissionRationale(
+                Manifest.permission.POST_NOTIFICATIONS
+            ) == true
+            if (!canAskAgain) {
+                val notifIntent = Intent(Settings.ACTION_APP_NOTIFICATION_SETTINGS).apply {
+                    putExtra(Settings.EXTRA_APP_PACKAGE, context.packageName)
+                }
+                try {
+                    context.startActivity(notifIntent)
+                } catch (_: Exception) {
+                    openAppDetailsSettings()
+                }
+            }
+        }
+    }
+
+    val cameraPermissionLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.RequestPermission()
+    ) { granted ->
+        refreshTick++
+        if (!granted) {
+            val activity = context as? Activity
+            val canAskAgain = activity?.shouldShowRequestPermissionRationale(
+                Manifest.permission.CAMERA
+            ) == true
+            if (!canAskAgain) {
+                openAppDetailsSettings()
+            }
+        }
     }
 
     val requestVpnPermission = {
@@ -718,26 +782,38 @@ private fun GettingStartedPermissionsStep(
         }
     }
 
-    val openBatterySettings = {
+    val openSystemVpnSettings = {
+        try {
+            context.startActivity(Intent(Settings.ACTION_VPN_SETTINGS))
+        } catch (_: Exception) {
+            try {
+                context.startActivity(Intent(Settings.ACTION_SETTINGS))
+            } catch (_: Exception) {
+                onShowMessage("Open Android Settings -> Network & internet -> VPN")
+            }
+        }
+    }
+
+    val openBatteryAllAppsSettings = {
         val batteryListIntent = Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS)
-        val fallbackIntent = Intent(
-            Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
-            Uri.fromParts("package", context.packageName, null)
-        )
         try {
             if (batteryListIntent.resolveActivity(context.packageManager) != null) {
                 context.startActivity(batteryListIntent)
             } else {
-                context.startActivity(fallbackIntent)
+                openAppDetailsSettings()
             }
         } catch (_: Exception) {
-            try {
-                context.startActivity(fallbackIntent)
-            } catch (_: Exception) {
-                onShowMessage("Open Android Settings -> Battery to set Hollow to Unrestricted")
-            }
+            openAppDetailsSettings()
         }
     }
+
+    val verifiedCount = listOf(
+        isVpnGranted,
+        killSwitchConfirmed,
+        isNotificationGranted,
+        isBatteryUnrestricted,
+        isCameraGranted
+    ).count { it }
 
     Column(modifier = Modifier.fillMaxSize()) {
         Column(
@@ -745,37 +821,88 @@ private fun GettingStartedPermissionsStep(
                 .weight(1f)
                 .verticalScroll(rememberScrollState())
         ) {
-            Spacer(modifier = Modifier.height(if (isCompact) 20.dp else 44.dp))
+            Spacer(modifier = Modifier.height(if (isCompact) 14.dp else 28.dp))
 
             Text(
-                text = "One last step.",
+                text = if (settings.hasCompletedOnboarding) {
+                    "Permissions & kill switch."
+                } else {
+                    "One last step."
+                },
                 fontFamily = SpaceGroteskFamily,
                 fontWeight = FontWeight.Bold,
-                fontSize = if (isCompact) 34.sp else 42.sp,
-                lineHeight = if (isCompact) 37.sp else 45.sp,
-                letterSpacing = (-1.3).sp,
+                fontSize = if (isCompact) 32.sp else 38.sp,
+                lineHeight = if (isCompact) 35.sp else 42.sp,
+                letterSpacing = (-1.2).sp,
                 color = HollowInk
             )
 
-            Spacer(modifier = Modifier.height(12.dp))
+            Spacer(modifier = Modifier.height(10.dp))
 
             Text(
-                text = "Android will ask to set up a VPN. Allow it so Hollow can protect your device.",
+                text = "Verify VPN access, Always-on kill switch protection, and background permissions so your connection stays leak-free.",
                 fontFamily = SpaceGroteskFamily,
                 fontWeight = FontWeight.Normal,
-                fontSize = if (isCompact) 16.sp else 17.sp,
-                lineHeight = if (isCompact) 23.sp else 25.sp,
+                fontSize = if (isCompact) 15.sp else 16.sp,
+                lineHeight = if (isCompact) 21.sp else 23.sp,
                 color = HollowInkSecondary
             )
 
-            Spacer(modifier = Modifier.height(22.dp))
+            Spacer(modifier = Modifier.height(14.dp))
+
+            Surface(
+                modifier = Modifier.fillMaxWidth(),
+                shape = RoundedCornerShape(14.dp),
+                color = HollowCreamSurface,
+                border = BorderStroke(1.dp, HollowCreamDivider)
+            ) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 14.dp, vertical = 10.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        Box(
+                            modifier = Modifier
+                                .size(8.dp)
+                                .clip(CircleShape)
+                                .background(if (isVpnGranted) HollowForest else HollowOrange)
+                        )
+                        Text(
+                            text = if (isVpnGranted) {
+                                "$verifiedCount/5 verified · VPN ready"
+                            } else {
+                                "Action needed · Allow VPN connection"
+                            },
+                            fontFamily = JetBrainsMonoFamily,
+                            fontWeight = FontWeight.Medium,
+                            fontSize = 12.sp,
+                            color = HollowInk
+                        )
+                    }
+                    Text(
+                        text = "$verifiedCount/5",
+                        fontFamily = JetBrainsMonoFamily,
+                        fontWeight = FontWeight.Bold,
+                        fontSize = 12.sp,
+                        color = if (verifiedCount == 5) HollowForest else HollowOrange
+                    )
+                }
+            }
+
+            Spacer(modifier = Modifier.height(16.dp))
             HorizontalDivider(thickness = 1.dp, color = HollowCreamDivider)
 
             PermissionChecklistRow(
                 title = "VPN connection",
-                subtitle = "Required to route traffic",
+                subtitle = "Required to route & encrypt all traffic",
                 badgeText = if (isVpnGranted) "GRANTED" else "REQUIRED",
-                badgeColor = HollowOrange,
+                badgeColor = if (isVpnGranted) HollowForest else HollowOrange,
                 isChecked = isVpnGranted,
                 isPrimaryAccent = true,
                 onClick = {
@@ -787,14 +914,28 @@ private fun GettingStartedPermissionsStep(
             HorizontalDivider(thickness = 1.dp, color = HollowCreamDivider)
 
             PermissionChecklistRow(
+                title = "Always-on & kill switch",
+                subtitle = "Block connections without VPN if tunnel drops",
+                badgeText = if (killSwitchConfirmed) "ENABLED" else "GUIDE",
+                badgeColor = if (killSwitchConfirmed) HollowForest else HollowOrange,
+                isChecked = killSwitchConfirmed,
+                isPrimaryAccent = false,
+                onClick = { showKillSwitchGuide = true },
+                testTag = "onboarding_row_kill_switch"
+            )
+            HorizontalDivider(thickness = 1.dp, color = HollowCreamDivider)
+
+            PermissionChecklistRow(
                 title = "Notifications",
-                subtitle = "Show connection status",
-                badgeText = if (isNotificationGranted) "GRANTED" else "OPTIONAL",
-                badgeColor = if (isNotificationGranted) HollowInk else HollowInkSecondary,
+                subtitle = "Live speed, server & disconnect controls",
+                badgeText = if (isNotificationGranted) "GRANTED" else "ADVISED",
+                badgeColor = if (isNotificationGranted) HollowForest else HollowInkSecondary,
                 isChecked = isNotificationGranted,
                 isPrimaryAccent = false,
                 onClick = {
-                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                    if (isNotificationGranted) {
+                        onShowMessage("Notifications permission is already granted")
+                    } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
                         notificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
                     } else {
                         refreshTick++
@@ -806,13 +947,37 @@ private fun GettingStartedPermissionsStep(
 
             PermissionChecklistRow(
                 title = "Unrestricted battery",
-                subtitle = "Keep the tunnel alive",
+                subtitle = "Prevent Android from stopping VPN in background",
                 badgeText = if (isBatteryUnrestricted) "ENABLED" else "ADVISED",
-                badgeColor = if (isBatteryUnrestricted) HollowInk else HollowInkSecondary,
+                badgeColor = if (isBatteryUnrestricted) HollowForest else HollowInkSecondary,
                 isChecked = isBatteryUnrestricted,
                 isPrimaryAccent = false,
-                onClick = openBatterySettings,
+                onClick = {
+                    if (isBatteryUnrestricted) {
+                        onShowMessage("Unrestricted battery is already enabled")
+                    } else {
+                        showBatteryGuide = true
+                    }
+                },
                 testTag = "onboarding_row_battery"
+            )
+            HorizontalDivider(thickness = 1.dp, color = HollowCreamDivider)
+
+            PermissionChecklistRow(
+                title = "Camera (QR scanner)",
+                subtitle = "Scan server & subscription QR codes",
+                badgeText = if (isCameraGranted) "GRANTED" else "OPTIONAL",
+                badgeColor = if (isCameraGranted) HollowForest else HollowInkSecondary,
+                isChecked = isCameraGranted,
+                isPrimaryAccent = false,
+                onClick = {
+                    if (isCameraGranted) {
+                        onShowMessage("Camera permission is already granted")
+                    } else {
+                        cameraPermissionLauncher.launch(Manifest.permission.CAMERA)
+                    }
+                },
+                testTag = "onboarding_row_camera"
             )
             HorizontalDivider(thickness = 1.dp, color = HollowCreamDivider)
         }
@@ -847,16 +1012,218 @@ private fun GettingStartedPermissionsStep(
                     .height(56.dp)
                     .testTag("onboarding_allow_button")
             ) {
-                val label = if (serverCount > 0 && !isVpnGranted) {
-                    "Allow & continue"
-                } else {
-                    "Allow & continue"
+                val label = when {
+                    settings.hasCompletedOnboarding -> "Done & return"
+                    serverCount > 0 && !isVpnGranted -> "Allow & continue"
+                    else -> "Allow & continue"
                 }
                 Text(
                     text = label,
                     fontFamily = SpaceGroteskFamily,
                     fontWeight = FontWeight.SemiBold,
                     fontSize = 17.sp
+                )
+            }
+        }
+    }
+
+    if (showKillSwitchGuide) {
+        PermissionGuideModalSheet(
+            icon = Icons.Outlined.Lock,
+            title = "Kill switch & Always-on VPN",
+            summary = "Android manages the Kill Switch ('Block connections without VPN') at the system level so zero unencrypted packets can leak if the tunnel drops.",
+            steps = listOf(
+                "Tap 'Open Android VPN Settings' below.",
+                "Tap the settings gear icon next to Hollow VPN.",
+                "Turn on 'Always-on VPN' and 'Block connections without VPN'."
+            ),
+            primaryActionLabel = "Open Android VPN Settings",
+            onPrimaryAction = {
+                openSystemVpnSettings()
+            },
+            secondaryActionLabel = if (killSwitchConfirmed) "Keep enabled" else "I've enabled it",
+            onSecondaryAction = {
+                killSwitchConfirmed = true
+                prefs.edit().putBoolean("kill_switch_guide_confirmed", true).apply()
+                showKillSwitchGuide = false
+                onShowMessage("Kill switch guide marked as configured")
+            },
+            onDismiss = { showKillSwitchGuide = false }
+        )
+    }
+
+    if (showBatteryGuide) {
+        PermissionGuideModalSheet(
+            icon = Icons.Outlined.BatteryChargingFull,
+            title = "Unrestricted battery",
+            summary = "Aggressive phone battery savers can terminate background VPN services when your screen turns off.",
+            steps = listOf(
+                "Tap 'Open Hollow App Info' below.",
+                "Select 'Battery' (or 'App battery usage').",
+                "Choose 'Unrestricted' or 'Don't optimize'."
+            ),
+            primaryActionLabel = "Open Hollow App Info",
+            onPrimaryAction = {
+                openAppDetailsSettings()
+            },
+            secondaryActionLabel = "All-apps list",
+            onSecondaryAction = {
+                openBatteryAllAppsSettings()
+            },
+            onDismiss = { showBatteryGuide = false }
+        )
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun PermissionGuideModalSheet(
+    icon: ImageVector,
+    title: String,
+    summary: String,
+    steps: List<String>,
+    primaryActionLabel: String,
+    onPrimaryAction: () -> Unit,
+    secondaryActionLabel: String,
+    onSecondaryAction: () -> Unit,
+    onDismiss: () -> Unit
+) {
+    val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
+
+    ModalBottomSheet(
+        onDismissRequest = onDismiss,
+        sheetState = sheetState,
+        containerColor = HollowCream,
+        shape = RoundedCornerShape(topStart = 26.dp, topEnd = 26.dp)
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .navigationBarsPadding()
+                .padding(horizontal = 24.dp)
+                .padding(bottom = 26.dp)
+        ) {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(12.dp)
+            ) {
+                Box(
+                    modifier = Modifier
+                        .size(44.dp)
+                        .clip(RoundedCornerShape(13.dp))
+                        .background(HollowInk),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Icon(
+                        imageVector = icon,
+                        contentDescription = null,
+                        tint = HollowCream,
+                        modifier = Modifier.size(22.dp)
+                    )
+                }
+                Text(
+                    text = title,
+                    fontFamily = SpaceGroteskFamily,
+                    fontWeight = FontWeight.Bold,
+                    fontSize = 21.sp,
+                    color = HollowInk
+                )
+            }
+
+            Spacer(modifier = Modifier.height(12.dp))
+
+            Text(
+                text = summary,
+                style = MaterialTheme.typography.bodyMedium.copy(fontSize = 13.5.sp),
+                color = HollowInkSecondary
+            )
+
+            Spacer(modifier = Modifier.height(16.dp))
+
+            Surface(
+                modifier = Modifier.fillMaxWidth(),
+                shape = RoundedCornerShape(16.dp),
+                color = HollowCreamSurface,
+                border = BorderStroke(1.dp, HollowCreamDivider)
+            ) {
+                Column(
+                    modifier = Modifier.padding(16.dp),
+                    verticalArrangement = Arrangement.spacedBy(12.dp)
+                ) {
+                    steps.forEachIndexed { idx, stepText ->
+                        Row(
+                            verticalAlignment = Alignment.Top,
+                            horizontalArrangement = Arrangement.spacedBy(12.dp)
+                        ) {
+                            Box(
+                                modifier = Modifier
+                                    .size(24.dp)
+                                    .clip(CircleShape)
+                                    .background(HollowInk),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Text(
+                                    text = "${idx + 1}",
+                                    fontFamily = JetBrainsMonoFamily,
+                                    fontWeight = FontWeight.Bold,
+                                    fontSize = 11.5.sp,
+                                    color = HollowCream
+                                )
+                            }
+                            Text(
+                                text = stepText,
+                                style = MaterialTheme.typography.bodyMedium.copy(fontSize = 13.5.sp),
+                                color = HollowInk,
+                                modifier = Modifier.weight(1f)
+                            )
+                        }
+                    }
+                }
+            }
+
+            Spacer(modifier = Modifier.height(18.dp))
+
+            Button(
+                onClick = onPrimaryAction,
+                shape = RoundedCornerShape(14.dp),
+                colors = ButtonDefaults.buttonColors(
+                    containerColor = HollowInk,
+                    contentColor = HollowCream
+                ),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(52.dp)
+            ) {
+                Icon(
+                    imageVector = Icons.AutoMirrored.Rounded.OpenInNew,
+                    contentDescription = null,
+                    modifier = Modifier.size(17.dp)
+                )
+                Spacer(Modifier.width(8.dp))
+                Text(
+                    text = primaryActionLabel,
+                    fontFamily = SpaceGroteskFamily,
+                    fontWeight = FontWeight.SemiBold,
+                    fontSize = 15.sp
+                )
+            }
+
+            Spacer(modifier = Modifier.height(10.dp))
+
+            OutlinedButton(
+                onClick = onSecondaryAction,
+                shape = RoundedCornerShape(14.dp),
+                border = BorderStroke(1.2.dp, HollowInk),
+                colors = ButtonDefaults.outlinedButtonColors(contentColor = HollowInk),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(48.dp)
+            ) {
+                Text(
+                    text = secondaryActionLabel,
+                    fontFamily = SpaceGroteskFamily,
+                    fontWeight = FontWeight.SemiBold,
+                    fontSize = 14.5.sp
                 )
             }
         }

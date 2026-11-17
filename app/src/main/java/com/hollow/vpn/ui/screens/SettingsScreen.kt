@@ -430,7 +430,7 @@ fun SettingsScreen(
             SettingsValueNavigationRow(
                 icon = Icons.Outlined.Info,
                 title = "Setup & permissions guide",
-                subtitle = "Verify VPN and battery optimization permissions",
+                subtitle = "Verify VPN, kill switch, notifications & battery",
                 valueText = null,
                 onClick = onOpenGettingStarted,
                 testTag = "row_getting_started"
