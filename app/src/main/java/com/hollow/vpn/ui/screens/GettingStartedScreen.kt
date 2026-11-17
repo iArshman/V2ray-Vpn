@@ -52,11 +52,8 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.KeyboardArrowRight
 import androidx.compose.material.icons.automirrored.rounded.OpenInNew
 import androidx.compose.material.icons.outlined.BatteryChargingFull
-import androidx.compose.material.icons.outlined.CameraAlt
 import androidx.compose.material.icons.outlined.ContentPaste
 import androidx.compose.material.icons.outlined.Lock
-import androidx.compose.material.icons.outlined.NotificationsActive
-import androidx.compose.material.icons.outlined.Shield
 import androidx.compose.material.icons.rounded.Check
 import androidx.compose.material.icons.rounded.Link
 import androidx.compose.material.icons.rounded.QrCodeScanner
@@ -381,20 +378,20 @@ private fun GettingStartedWelcomeStep(
                 text = "Private by default.",
                 fontFamily = SpaceGroteskFamily,
                 fontWeight = FontWeight.Bold,
-                fontSize = if (isCompact) 34.sp else 42.sp,
-                lineHeight = if (isCompact) 37.sp else 45.sp,
-                letterSpacing = (-1.3).sp,
+                fontSize = if (isCompact) 28.sp else 32.sp,
+                lineHeight = if (isCompact) 31.sp else 36.sp,
+                letterSpacing = (-1.0).sp,
                 color = HollowInk
             )
 
-            Spacer(modifier = Modifier.height(12.dp))
+            Spacer(modifier = Modifier.height(10.dp))
 
             Text(
                 text = "Hollow sends your whole device through servers you control. No accounts, no tracking.",
                 fontFamily = SpaceGroteskFamily,
                 fontWeight = FontWeight.Normal,
-                fontSize = if (isCompact) 16.sp else 17.sp,
-                lineHeight = if (isCompact) 23.sp else 25.sp,
+                fontSize = if (isCompact) 14.sp else 15.sp,
+                lineHeight = if (isCompact) 20.sp else 22.sp,
                 color = HollowInkSecondary
             )
         }
@@ -402,7 +399,7 @@ private fun GettingStartedWelcomeStep(
         Box(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(top = 12.dp, bottom = 28.dp)
+                .padding(top = 10.dp, bottom = 18.dp)
         ) {
             Button(
                 onClick = onGetStarted,
@@ -413,14 +410,14 @@ private fun GettingStartedWelcomeStep(
                 ),
                 modifier = Modifier
                     .fillMaxWidth()
-                    .height(56.dp)
+                    .height(52.dp)
                     .testTag("onboarding_next_button")
             ) {
                 Text(
                     text = "Get started",
                     fontFamily = SpaceGroteskFamily,
                     fontWeight = FontWeight.SemiBold,
-                    fontSize = 17.sp
+                    fontSize = 15.5.sp
                 )
             }
         }
@@ -443,26 +440,26 @@ private fun GettingStartedServersStep(
                 .weight(1f)
                 .verticalScroll(rememberScrollState())
         ) {
-            Spacer(modifier = Modifier.height(if (isCompact) 20.dp else 44.dp))
+            Spacer(modifier = Modifier.height(if (isCompact) 10.dp else 20.dp))
 
             Text(
                 text = "Bring your own servers.",
                 fontFamily = SpaceGroteskFamily,
                 fontWeight = FontWeight.Bold,
-                fontSize = if (isCompact) 34.sp else 42.sp,
-                lineHeight = if (isCompact) 37.sp else 45.sp,
-                letterSpacing = (-1.3).sp,
+                fontSize = if (isCompact) 26.sp else 30.sp,
+                lineHeight = if (isCompact) 30.sp else 34.sp,
+                letterSpacing = (-1.0).sp,
                 color = HollowInk
             )
 
-            Spacer(modifier = Modifier.height(12.dp))
+            Spacer(modifier = Modifier.height(8.dp))
 
             Text(
                 text = "Add a server any of these ways. You can change it later.",
                 fontFamily = SpaceGroteskFamily,
                 fontWeight = FontWeight.Normal,
-                fontSize = if (isCompact) 16.sp else 17.sp,
-                lineHeight = if (isCompact) 23.sp else 25.sp,
+                fontSize = if (isCompact) 13.5.sp else 14.5.sp,
+                lineHeight = if (isCompact) 19.sp else 21.sp,
                 color = HollowInkSecondary
             )
 
@@ -552,7 +549,7 @@ private fun GettingStartedServersStep(
         Box(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(top = 12.dp, bottom = 28.dp)
+                .padding(top = 10.dp, bottom = 18.dp)
         ) {
             Button(
                 onClick = onContinue,
@@ -563,14 +560,14 @@ private fun GettingStartedServersStep(
                 ),
                 modifier = Modifier
                     .fillMaxWidth()
-                    .height(56.dp)
+                    .height(52.dp)
                     .testTag("onboarding_next_button")
             ) {
                 Text(
                     text = "Continue",
                     fontFamily = SpaceGroteskFamily,
                     fontWeight = FontWeight.SemiBold,
-                    fontSize = 17.sp
+                    fontSize = 15.5.sp
                 )
             }
         }
@@ -589,22 +586,22 @@ private fun OnboardingServerOptionCard(
         modifier = Modifier
             .fillMaxWidth()
             .minimumInteractiveComponentSize()
-            .clip(RoundedCornerShape(20.dp))
+            .clip(RoundedCornerShape(18.dp))
             .clickable(role = Role.Button, onClick = onClick)
             .testTag(testTag),
-        shape = RoundedCornerShape(20.dp),
+        shape = RoundedCornerShape(18.dp),
         color = HollowCreamSurface
     ) {
         Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(16.dp),
+                .padding(13.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
             Box(
                 modifier = Modifier
-                    .size(48.dp)
-                    .clip(RoundedCornerShape(14.dp))
+                    .size(42.dp)
+                    .clip(RoundedCornerShape(12.dp))
                     .background(HollowInk),
                 contentAlignment = Alignment.Center
             ) {
@@ -612,18 +609,18 @@ private fun OnboardingServerOptionCard(
                     imageVector = icon,
                     contentDescription = null,
                     tint = HollowCream,
-                    modifier = Modifier.size(22.dp)
+                    modifier = Modifier.size(20.dp)
                 )
             }
 
-            Spacer(modifier = Modifier.width(14.dp))
+            Spacer(modifier = Modifier.width(12.dp))
 
             Column(modifier = Modifier.weight(1f)) {
                 Text(
                     text = title,
                     fontFamily = SpaceGroteskFamily,
                     fontWeight = FontWeight.SemiBold,
-                    fontSize = 19.sp,
+                    fontSize = 16.sp,
                     letterSpacing = (-0.2).sp,
                     color = HollowInk
                 )
@@ -631,7 +628,7 @@ private fun OnboardingServerOptionCard(
                 Text(
                     text = subtitle,
                     fontFamily = SpaceGroteskFamily,
-                    fontSize = 14.sp,
+                    fontSize = 12.5.sp,
                     color = HollowInkSecondary
                 )
             }
@@ -821,7 +818,7 @@ private fun GettingStartedPermissionsStep(
                 .weight(1f)
                 .verticalScroll(rememberScrollState())
         ) {
-            Spacer(modifier = Modifier.height(if (isCompact) 14.dp else 28.dp))
+            Spacer(modifier = Modifier.height(if (isCompact) 4.dp else 10.dp))
 
             Text(
                 text = if (settings.hasCompletedOnboarding) {
@@ -831,35 +828,35 @@ private fun GettingStartedPermissionsStep(
                 },
                 fontFamily = SpaceGroteskFamily,
                 fontWeight = FontWeight.Bold,
-                fontSize = if (isCompact) 32.sp else 38.sp,
-                lineHeight = if (isCompact) 35.sp else 42.sp,
-                letterSpacing = (-1.2).sp,
+                fontSize = if (isCompact) 24.sp else 28.sp,
+                lineHeight = if (isCompact) 28.sp else 32.sp,
+                letterSpacing = (-0.8).sp,
                 color = HollowInk
             )
 
-            Spacer(modifier = Modifier.height(10.dp))
+            Spacer(modifier = Modifier.height(6.dp))
 
             Text(
                 text = "Verify VPN access, Always-on kill switch protection, and background permissions so your connection stays leak-free.",
                 fontFamily = SpaceGroteskFamily,
                 fontWeight = FontWeight.Normal,
-                fontSize = if (isCompact) 15.sp else 16.sp,
-                lineHeight = if (isCompact) 21.sp else 23.sp,
+                fontSize = if (isCompact) 12.5.sp else 13.5.sp,
+                lineHeight = if (isCompact) 17.sp else 19.sp,
                 color = HollowInkSecondary
             )
 
-            Spacer(modifier = Modifier.height(14.dp))
+            Spacer(modifier = Modifier.height(10.dp))
 
             Surface(
                 modifier = Modifier.fillMaxWidth(),
-                shape = RoundedCornerShape(14.dp),
+                shape = RoundedCornerShape(12.dp),
                 color = HollowCreamSurface,
                 border = BorderStroke(1.dp, HollowCreamDivider)
             ) {
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .padding(horizontal = 14.dp, vertical = 10.dp),
+                        .padding(horizontal = 12.dp, vertical = 8.dp),
                     verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.SpaceBetween
                 ) {
@@ -869,7 +866,7 @@ private fun GettingStartedPermissionsStep(
                     ) {
                         Box(
                             modifier = Modifier
-                                .size(8.dp)
+                                .size(7.dp)
                                 .clip(CircleShape)
                                 .background(if (isVpnGranted) HollowForest else HollowOrange)
                         )
@@ -881,7 +878,7 @@ private fun GettingStartedPermissionsStep(
                             },
                             fontFamily = JetBrainsMonoFamily,
                             fontWeight = FontWeight.Medium,
-                            fontSize = 12.sp,
+                            fontSize = 11.sp,
                             color = HollowInk
                         )
                     }
@@ -889,13 +886,13 @@ private fun GettingStartedPermissionsStep(
                         text = "$verifiedCount/5",
                         fontFamily = JetBrainsMonoFamily,
                         fontWeight = FontWeight.Bold,
-                        fontSize = 12.sp,
+                        fontSize = 11.sp,
                         color = if (verifiedCount == 5) HollowForest else HollowOrange
                     )
                 }
             }
 
-            Spacer(modifier = Modifier.height(16.dp))
+            Spacer(modifier = Modifier.height(10.dp))
             HorizontalDivider(thickness = 1.dp, color = HollowCreamDivider)
 
             PermissionChecklistRow(
@@ -985,7 +982,7 @@ private fun GettingStartedPermissionsStep(
         Box(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(top = 12.dp, bottom = 28.dp)
+                .padding(top = 8.dp, bottom = 16.dp)
         ) {
             Button(
                 onClick = {
@@ -1009,7 +1006,7 @@ private fun GettingStartedPermissionsStep(
                 ),
                 modifier = Modifier
                     .fillMaxWidth()
-                    .height(56.dp)
+                    .height(50.dp)
                     .testTag("onboarding_allow_button")
             ) {
                 val label = when {
@@ -1021,7 +1018,7 @@ private fun GettingStartedPermissionsStep(
                     text = label,
                     fontFamily = SpaceGroteskFamily,
                     fontWeight = FontWeight.SemiBold,
-                    fontSize = 17.sp
+                    fontSize = 15.5.sp
                 )
             }
         }
@@ -1125,20 +1122,20 @@ private fun PermissionGuideModalSheet(
                     text = title,
                     fontFamily = SpaceGroteskFamily,
                     fontWeight = FontWeight.Bold,
-                    fontSize = 21.sp,
+                    fontSize = 18.5.sp,
                     color = HollowInk
                 )
             }
 
-            Spacer(modifier = Modifier.height(12.dp))
+            Spacer(modifier = Modifier.height(10.dp))
 
             Text(
                 text = summary,
-                style = MaterialTheme.typography.bodyMedium.copy(fontSize = 13.5.sp),
+                style = MaterialTheme.typography.bodyMedium.copy(fontSize = 12.5.sp, lineHeight = 18.sp),
                 color = HollowInkSecondary
             )
 
-            Spacer(modifier = Modifier.height(16.dp))
+            Spacer(modifier = Modifier.height(14.dp))
 
             Surface(
                 modifier = Modifier.fillMaxWidth(),
@@ -1147,17 +1144,17 @@ private fun PermissionGuideModalSheet(
                 border = BorderStroke(1.dp, HollowCreamDivider)
             ) {
                 Column(
-                    modifier = Modifier.padding(16.dp),
-                    verticalArrangement = Arrangement.spacedBy(12.dp)
+                    modifier = Modifier.padding(14.dp),
+                    verticalArrangement = Arrangement.spacedBy(10.dp)
                 ) {
                     steps.forEachIndexed { idx, stepText ->
                         Row(
                             verticalAlignment = Alignment.Top,
-                            horizontalArrangement = Arrangement.spacedBy(12.dp)
+                            horizontalArrangement = Arrangement.spacedBy(10.dp)
                         ) {
                             Box(
                                 modifier = Modifier
-                                    .size(24.dp)
+                                    .size(22.dp)
                                     .clip(CircleShape)
                                     .background(HollowInk),
                                 contentAlignment = Alignment.Center
@@ -1166,13 +1163,13 @@ private fun PermissionGuideModalSheet(
                                     text = "${idx + 1}",
                                     fontFamily = JetBrainsMonoFamily,
                                     fontWeight = FontWeight.Bold,
-                                    fontSize = 11.5.sp,
+                                    fontSize = 11.sp,
                                     color = HollowCream
                                 )
                             }
                             Text(
                                 text = stepText,
-                                style = MaterialTheme.typography.bodyMedium.copy(fontSize = 13.5.sp),
+                                style = MaterialTheme.typography.bodyMedium.copy(fontSize = 12.5.sp, lineHeight = 18.sp),
                                 color = HollowInk,
                                 modifier = Modifier.weight(1f)
                             )
@@ -1246,7 +1243,7 @@ private fun PermissionChecklistRow(
             .fillMaxWidth()
             .minimumInteractiveComponentSize()
             .clickable(role = Role.Button, onClick = onClick)
-            .padding(vertical = 18.dp)
+            .padding(vertical = 10.dp)
             .testTag(testTag)
             .semantics { contentDescription = "$title, $subtitle, $badgeText" },
         verticalAlignment = Alignment.CenterVertically
@@ -1262,7 +1259,7 @@ private fun PermissionChecklistRow(
         }
         Box(
             modifier = Modifier
-                .size(32.dp)
+                .size(26.dp)
                 .clip(CircleShape)
                 .background(circleBg)
                 .border(2.dp, circleBorder, CircleShape),
@@ -1273,33 +1270,35 @@ private fun PermissionChecklistRow(
                     imageVector = Icons.Rounded.Check,
                     contentDescription = null,
                     tint = Color.White,
-                    modifier = Modifier.size(16.dp)
+                    modifier = Modifier.size(14.dp)
                 )
             } else if (isPrimaryAccent) {
                 Box(
                     modifier = Modifier
-                        .size(8.dp)
+                        .size(7.dp)
                         .clip(CircleShape)
                         .background(HollowOrange)
                 )
             }
         }
 
-        Spacer(modifier = Modifier.width(14.dp))
+        Spacer(modifier = Modifier.width(12.dp))
 
         Column(modifier = Modifier.weight(1f)) {
             Text(
                 text = title,
                 fontFamily = SpaceGroteskFamily,
                 fontWeight = FontWeight.SemiBold,
-                fontSize = 17.sp,
+                fontSize = 14.5.sp,
+                lineHeight = 18.sp,
                 color = HollowInk
             )
-            Spacer(modifier = Modifier.height(2.dp))
+            Spacer(modifier = Modifier.height(1.dp))
             Text(
                 text = subtitle,
                 fontFamily = SpaceGroteskFamily,
-                fontSize = 14.sp,
+                fontSize = 12.sp,
+                lineHeight = 15.5.sp,
                 color = HollowInkSecondary
             )
         }
@@ -1310,8 +1309,8 @@ private fun PermissionChecklistRow(
             text = badgeText,
             fontFamily = JetBrainsMonoFamily,
             fontWeight = FontWeight.Medium,
-            fontSize = 12.sp,
-            letterSpacing = 1.sp,
+            fontSize = 10.5.sp,
+            letterSpacing = 0.7.sp,
             color = badgeColor
         )
     }

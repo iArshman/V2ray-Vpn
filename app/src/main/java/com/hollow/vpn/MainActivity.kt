@@ -13,8 +13,16 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.Crossfade
 import androidx.compose.animation.core.tween
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.slideInVertically
+import androidx.compose.animation.slideOutVertically
+import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Row
@@ -22,6 +30,7 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.Dns
@@ -35,7 +44,9 @@ import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Snackbar
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.minimumInteractiveComponentSize
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.SideEffect
@@ -43,11 +54,16 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalView
+import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
 import androidx.core.view.WindowCompat
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
@@ -55,6 +71,7 @@ import androidx.lifecycle.viewmodel.compose.viewModel
 import com.hollow.vpn.ui.AddServerTab
 import com.hollow.vpn.ui.VpnScreen
 import com.hollow.vpn.ui.VpnViewModel
+import com.hollow.vpn.ui.components.HollowBlinkingDot
 import com.hollow.vpn.ui.components.HollowBottomNavigationBar
 import com.hollow.vpn.ui.components.HollowBottomTab
 import com.hollow.vpn.ui.components.ServerQrShareDialog
@@ -79,6 +96,8 @@ import com.hollow.vpn.ui.theme.HollowObsidianDivider
 import com.hollow.vpn.ui.theme.HollowObsidianMuted
 import com.hollow.vpn.ui.theme.HollowOrange
 import com.hollow.vpn.ui.theme.HollowVpnTheme
+import com.hollow.vpn.ui.theme.JetBrainsMonoFamily
+import com.hollow.vpn.ui.theme.SpaceGroteskFamily
 import com.hollow.vpn.vpn.XrayVpnService
 
 class MainActivity : ComponentActivity() {
@@ -108,6 +127,7 @@ fun HollowVpnApp(
     val telemetry by vpnViewModel.telemetry.collectAsStateWithLifecycle()
     val settings by vpnViewModel.settings.collectAsStateWithLifecycle()
     val fetchingStatus by vpnViewModel.fetchingStatusMessage.collectAsStateWithLifecycle()
+    val fetchingProgress by vpnViewModel.fetchingProgress.collectAsStateWithLifecycle()
     val snackbarMessage by vpnViewModel.snackbarMessage.collectAsStateWithLifecycle()
     val activeAddTab by vpnViewModel.activeAddTab.collectAsStateWithLifecycle()
     val inspectingJsonServer by vpnViewModel.inspectingJsonServer.collectAsStateWithLifecycle()
@@ -354,9 +374,8 @@ fun HollowVpnApp(
                             VpnScreen.SPLASH_FETCHING -> {
                                 SplashFetchingScreen(
                                     statusSubtitle = fetchingStatus,
-                                    onCancelOrSkip = {
-                                        vpnViewModel.navigateTo(VpnScreen.SERVER_LIST)
-                                    }
+                                    progress = fetchingProgress,
+                                    onCancelOrSkip = vpnViewModel::hideFetchingScreen
                                 )
                             }
 
@@ -481,6 +500,58 @@ fun HollowVpnApp(
                                             vpnViewModel.navigateTo(VpnScreen.SERVER_LIST)
                                         }
                                     }
+                                )
+                            }
+                        }
+                    }
+
+                    androidx.compose.animation.AnimatedVisibility(
+                        visible = fetchingProgress.isActive &&
+                            currentScreen != VpnScreen.SPLASH_FETCHING &&
+                            currentScreen != VpnScreen.GETTING_STARTED,
+                        enter = fadeIn() + slideInVertically { it / 2 },
+                        exit = fadeOut() + slideOutVertically { it / 2 },
+                        modifier = Modifier
+                            .align(Alignment.BottomCenter)
+                            .padding(
+                                bottom = innerPadding.calculateBottomPadding() + 12.dp,
+                                start = 18.dp,
+                                end = 18.dp
+                            )
+                    ) {
+                        Surface(
+                            shape = RoundedCornerShape(999.dp),
+                            color = HollowInk,
+                            border = BorderStroke(1.dp, HollowObsidianDivider),
+                            shadowElevation = 6.dp,
+                            modifier = Modifier
+                                .minimumInteractiveComponentSize()
+                                .clip(RoundedCornerShape(999.dp))
+                                .clickable(role = Role.Button) {
+                                    vpnViewModel.reopenFetchingScreen()
+                                }
+                        ) {
+                            Row(
+                                modifier = Modifier.padding(horizontal = 16.dp, vertical = 10.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(10.dp)
+                            ) {
+                                HollowBlinkingDot(
+                                    color = if (fetchingProgress.workingCount > 0) HollowLime else HollowOrange
+                                )
+                                Text(
+                                    text = "Fetching · ${fetchingProgress.workingCount} ready",
+                                    fontFamily = JetBrainsMonoFamily,
+                                    fontWeight = FontWeight.Medium,
+                                    fontSize = 12.sp,
+                                    color = HollowCream
+                                )
+                                Text(
+                                    text = "Show",
+                                    fontFamily = SpaceGroteskFamily,
+                                    fontWeight = FontWeight.SemiBold,
+                                    fontSize = 12.5.sp,
+                                    color = HollowOrange
                                 )
                             }
                         }

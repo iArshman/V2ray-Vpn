@@ -7,6 +7,8 @@ import androidx.lifecycle.viewModelScope
 import com.hollow.vpn.BuildConfig
 import com.hollow.vpn.data.AppSettingsState
 import com.hollow.vpn.data.AppUpdateState
+import com.hollow.vpn.data.FetchingProgressState
+import com.hollow.vpn.data.FetchingStage
 import com.hollow.vpn.data.ServerEntity
 import com.hollow.vpn.data.ServerFilter
 import com.hollow.vpn.data.SubscriptionEntity
@@ -135,6 +137,9 @@ class VpnViewModel(application: Application) : AndroidViewModel(application) {
     private val _fetchingStatusMessage = MutableStateFlow("Auto configuring for you")
     val fetchingStatusMessage: StateFlow<String> = _fetchingStatusMessage.asStateFlow()
 
+    private val _fetchingProgress = MutableStateFlow(FetchingProgressState())
+    val fetchingProgress: StateFlow<FetchingProgressState> = _fetchingProgress.asStateFlow()
+
     private val _snackbarMessage = MutableStateFlow<String?>(null)
     val snackbarMessage: StateFlow<String?> = _snackbarMessage.asStateFlow()
 
@@ -242,6 +247,7 @@ class VpnViewModel(application: Application) : AndroidViewModel(application) {
     private var ipRefreshJob: Job? = null
     private var connectJob: Job? = null
     private var repingJob: Job? = null
+    private var fetchSweepJob: Job? = null
 
     init {
         observeVpnServiceState()
@@ -593,6 +599,25 @@ class VpnViewModel(application: Application) : AndroidViewModel(application) {
         _currentScreen.value = screen
     }
 
+    fun hideFetchingScreen() {
+        if (_currentScreen.value == VpnScreen.SPLASH_FETCHING) {
+            if (!navigateBack()) {
+                val target = if (allServers.value.isNotEmpty()) VpnScreen.SERVER_LIST else VpnScreen.CONNECTED_HOME
+                _screenStack.value = listOf(target)
+                _currentScreen.value = target
+            }
+            if (_fetchingProgress.value.isActive) {
+                showMessage("Fetching & testing in background")
+            }
+        }
+    }
+
+    fun reopenFetchingScreen() {
+        if (_fetchingProgress.value.isActive) {
+            navigateTo(VpnScreen.SPLASH_FETCHING)
+        }
+    }
+
     fun navigateBack(): Boolean {
         val stack = _screenStack.value
         if (stack.size > 1) {
@@ -756,114 +781,128 @@ class VpnViewModel(application: Application) : AndroidViewModel(application) {
         autoConnectAfterFetch: Boolean = false,
         showLoadingScreen: Boolean = false
     ) {
-        viewModelScope.launch {
-            val subs = dao.getSubscriptionsOnce().filter { it.isEnabled && it.url.isNotBlank() }
-            val fallbackUrls = listOfNotNull(_settings.value.activeSubscriptionUrl.trim().takeIf { it.isNotBlank() })
+        fetchSweepJob?.cancel()
+        fetchSweepJob = viewModelScope.launch {
+            try {
+                val subs = dao.getSubscriptionsOnce().filter { it.isEnabled && it.url.isNotBlank() }
+                val fallbackUrls = listOfNotNull(_settings.value.activeSubscriptionUrl.trim().takeIf { it.isNotBlank() })
 
-            if (subs.isEmpty() && fallbackUrls.isEmpty()) {
-                val existing = dao.getAllServersOnce()
-                if (existing.isNotEmpty()) {
-                    if (showLoadingScreen) {
-                        _currentScreen.value = returnScreen
-                    }
-                    repingAllSavedServers()
-                } else if (showLoadingScreen) {
-                    navigateTo(VpnScreen.ADD_SERVER)
-                    showMessage("Add a subscription URL, server link, or QR code first")
-                }
-                return@launch
-            }
-
-            if (showLoadingScreen) {
-                _currentScreen.value = VpnScreen.SPLASH_FETCHING
-            }
-            _fetchingStatusMessage.value = "Fetching your subscription…"
-
-            val subResult = fletcher.fetchMultipleSubscriptionsAndRankTop15(
-                subscriptions = subs,
-                fallbackUrls = fallbackUrls,
-                context = getApplication(),
-                settings = _settings.value,
-                onProgress = { step -> _fetchingStatusMessage.value = step },
-                onSubscriptionStats = { sub, ok, count ->
-                    val updatedSub = if (ok) {
-                        sub.copy(
-                            successPulls = sub.successPulls + 1,
-                            lastFetchedAt = System.currentTimeMillis(),
-                            serverCount = count
-                        )
-                    } else {
-                        sub.copy(failedPulls = sub.failedPulls + 1)
-                    }
-                    dao.updateSubscription(updatedSub)
-                }
-            )
-
-            subResult.fold(
-                onSuccess = { rankedTop15 ->
-                    if (_settings.value.subReplaceExisting) {
-                        dao.deleteFetchedServers()
-                    }
-                    dao.clearSelection()
-                    val withSelected = rankedTop15.mapIndexed { idx, srv ->
-                        srv.copy(isSelected = idx == 0)
-                    }
-                    dao.insertServers(withSelected)
-
-                    if (showLoadingScreen) {
-                        _screenStack.value = listOf(VpnScreen.CONNECTED_HOME, returnScreen).distinct()
-                        _currentScreen.value = returnScreen
-                    }
-
-                    val fastest = withSelected.firstOrNull()
-                    if (autoConnectAfterFetch && fastest != null) {
-                        val savedFirst = dao.getAllServersOnce().firstOrNull { it.isSelected } ?: fastest
-                        connectToServer(savedFirst)
-                    } else if (fastest != null) {
-                        val ip = fletcher.resolveServerIpAddress(fastest.host)
-                        _telemetry.update { it.copy(serverIpLabel = ip) }
-                        val countryCount = withSelected.map { it.countryName }.distinct().size
-                        showMessage(
-                            "Ranked ${withSelected.size} verified servers across $countryCount countries · #1 ${fastest.countryName} (${fastest.pingMs} ms)"
-                        )
-                    }
-                },
-                onFailure = { error ->
-                    // Re-benchmark any already saved servers if feed fetch failed
+                if (subs.isEmpty() && fallbackUrls.isEmpty()) {
                     val existing = dao.getAllServersOnce()
                     if (existing.isNotEmpty()) {
-                        _fetchingStatusMessage.value = "Re-testing saved servers…"
-                        val reRanked = fletcher.benchmarkAndRankTop15(
-                            servers = existing,
-                            context = getApplication(),
-                            settings = _settings.value
-                        ) { step ->
-                            _fetchingStatusMessage.value = step
-                        }
-                        if (reRanked.isNotEmpty()) {
-                            dao.deleteAllServers()
-                            dao.insertServers(
-                                reRanked.mapIndexed { index, srv -> srv.copy(isSelected = index == 0) }
-                            )
-                        }
                         if (showLoadingScreen) {
                             _currentScreen.value = returnScreen
                         }
-                        showMessage("Updated latency for ${reRanked.size} reachable servers")
-                    } else {
-                        if (showLoadingScreen) {
-                            _currentScreen.value = VpnScreen.ADD_SERVER
-                        }
-                        showMessage("Fetch failed: ${error.message ?: "Check subscription URL"}")
+                        repingAllSavedServers()
+                    } else if (showLoadingScreen) {
+                        navigateTo(VpnScreen.ADD_SERVER)
+                        showMessage("Add a subscription URL, server link, or QR code first")
                     }
+                    return@launch
                 }
-            )
+
+                if (showLoadingScreen) {
+                    navigateTo(VpnScreen.SPLASH_FETCHING)
+                }
+                _fetchingStatusMessage.value = "Fetching your subscription…"
+                _fetchingProgress.value = FetchingProgressState(
+                    isActive = true,
+                    stage = FetchingStage.DOWNLOADING,
+                    headline = "Fetching & testing live",
+                    detail = "Fetching your subscription…"
+                )
+
+                val subResult = fletcher.fetchMultipleSubscriptionsAndRankTop15(
+                    subscriptions = subs,
+                    fallbackUrls = fallbackUrls,
+                    context = getApplication(),
+                    settings = _settings.value,
+                    onProgressState = { progress ->
+                        _fetchingProgress.value = progress
+                        _fetchingStatusMessage.value = progress.detail
+                    },
+                    onProgress = { step -> _fetchingStatusMessage.value = step },
+                    onSubscriptionStats = { sub, ok, count ->
+                        val updatedSub = if (ok) {
+                            sub.copy(
+                                successPulls = sub.successPulls + 1,
+                                lastFetchedAt = System.currentTimeMillis(),
+                                serverCount = count
+                            )
+                        } else {
+                            sub.copy(failedPulls = sub.failedPulls + 1)
+                        }
+                        dao.updateSubscription(updatedSub)
+                    }
+                )
+
+                subResult.fold(
+                    onSuccess = { rankedTop15 ->
+                        if (_settings.value.subReplaceExisting) {
+                            dao.deleteFetchedServers()
+                        }
+                        dao.clearSelection()
+                        val withSelected = rankedTop15.mapIndexed { idx, srv ->
+                            srv.copy(isSelected = idx == 0)
+                        }
+                        dao.insertServers(withSelected)
+
+                        if (showLoadingScreen && _currentScreen.value == VpnScreen.SPLASH_FETCHING) {
+                            _screenStack.value = listOf(VpnScreen.CONNECTED_HOME, returnScreen).distinct()
+                            _currentScreen.value = returnScreen
+                        }
+
+                        val fastest = withSelected.firstOrNull()
+                        if (autoConnectAfterFetch && fastest != null) {
+                            val savedFirst = dao.getAllServersOnce().firstOrNull { it.isSelected } ?: fastest
+                            connectToServer(savedFirst)
+                        } else if (fastest != null) {
+                            val ip = fletcher.resolveServerIpAddress(fastest.host)
+                            _telemetry.update { it.copy(serverIpLabel = ip) }
+                            val countryCount = withSelected.map { it.countryName }.distinct().size
+                            showMessage(
+                                "Ranked ${withSelected.size} verified servers across $countryCount countries · #1 ${fastest.countryName} (${fastest.pingMs} ms)"
+                            )
+                        }
+                    },
+                    onFailure = { error ->
+                        val existing = dao.getAllServersOnce()
+                        if (existing.isNotEmpty()) {
+                            _fetchingStatusMessage.value = "Re-testing saved servers…"
+                            val reRanked = fletcher.benchmarkAndRankTop15(
+                                servers = existing,
+                                context = getApplication(),
+                                settings = _settings.value
+                            ) { step ->
+                                _fetchingStatusMessage.value = step
+                            }
+                            if (reRanked.isNotEmpty()) {
+                                dao.deleteAllServers()
+                                dao.insertServers(
+                                    reRanked.mapIndexed { index, srv -> srv.copy(isSelected = index == 0) }
+                                )
+                            }
+                            if (showLoadingScreen && _currentScreen.value == VpnScreen.SPLASH_FETCHING) {
+                                _currentScreen.value = returnScreen
+                            }
+                            showMessage("Updated latency for ${reRanked.size} reachable servers")
+                        } else {
+                            if (showLoadingScreen && _currentScreen.value == VpnScreen.SPLASH_FETCHING) {
+                                _currentScreen.value = VpnScreen.ADD_SERVER
+                            }
+                            showMessage("Fetch failed: ${error.message ?: "Check subscription URL"}")
+                        }
+                    }
+                )
+            } finally {
+                _fetchingProgress.value = FetchingProgressState(isActive = false, stage = FetchingStage.IDLE)
+            }
         }
     }
 
     /**
-     * Adds a user-provided V2Ray Subscription URL (or inline URI/Base64 payload), fetches nodes,
-     * runs parallel TCP ping tests, drops dead nodes, and ranks the Top 15 fastest servers.
+     * Adds a user-provided V2Ray Subscription URL (or inline URI/Base64 payload), streams nodes,
+     * and tests reachability + Xray handshakes concurrently in a producer-consumer pipeline.
      */
     fun addAndFetchSubscriptionUrl(rawUrlOrLinks: String) {
         val input = rawUrlOrLinks.trim()
@@ -879,53 +918,74 @@ class VpnViewModel(application: Application) : AndroidViewModel(application) {
         }
 
         updateSettings { it.copy(activeSubscriptionUrl = input) }
-        _currentScreen.value = VpnScreen.SPLASH_FETCHING
+        navigateTo(VpnScreen.SPLASH_FETCHING)
 
-        viewModelScope.launch {
-            _fetchingStatusMessage.value = "Auto configuring for you"
-            dao.deleteSubscriptionByUrl(input)
-            dao.insertSubscription(
-                SubscriptionEntity(
-                    url = input,
-                    autoUpdate = _settings.value.subAutoUpdate,
-                    replaceExisting = _settings.value.subReplaceExisting
+        fetchSweepJob?.cancel()
+        fetchSweepJob = viewModelScope.launch {
+            try {
+                _fetchingStatusMessage.value = "Connecting to subscription feed…"
+                _fetchingProgress.value = FetchingProgressState(
+                    isActive = true,
+                    stage = FetchingStage.DOWNLOADING,
+                    headline = "Fetching & testing live",
+                    detail = "Connecting to subscription feed…"
                 )
-            )
-
-            val fetchResult = fletcher.fetchSubscriptionAndRankTop15(
-                subscriptionUrl = input,
-                context = getApplication(),
-                settings = _settings.value
-            ) { status ->
-                _fetchingStatusMessage.value = status
-            }
-
-            fetchResult.fold(
-                onSuccess = { top15Nodes ->
-                    if (_settings.value.subReplaceExisting) {
-                        dao.deleteFetchedServers()
-                    }
-                    dao.clearSelection()
-                    val marked = top15Nodes.mapIndexed { index, srv ->
-                        srv.copy(isSelected = index == 0)
-                    }
-                    dao.insertServers(marked)
-                    val fastest = marked.firstOrNull()
-                    if (fastest != null) {
-                        val ip = fletcher.resolveServerIpAddress(fastest.host)
-                        _telemetry.update { it.copy(serverIpLabel = ip) }
-                    }
-                    _currentScreen.value = VpnScreen.SERVER_LIST
-                    val countryCount = marked.map { it.countryName }.distinct().size
-                    showMessage(
-                        "Saved ${marked.size} verified servers across $countryCount countries · Fastest: ${fastest?.countryName ?: ""} (${fastest?.pingMs ?: 0} ms)"
+                dao.deleteSubscriptionByUrl(input)
+                dao.insertSubscription(
+                    SubscriptionEntity(
+                        url = input,
+                        autoUpdate = _settings.value.subAutoUpdate,
+                        replaceExisting = _settings.value.subReplaceExisting
                     )
-                },
-                onFailure = { err ->
-                    _currentScreen.value = VpnScreen.ADD_SERVER
-                    showMessage("Could not fetch servers: ${err.message}")
-                }
-            )
+                )
+
+                val fetchResult = fletcher.fetchSubscriptionAndRankTop15(
+                    subscriptionUrl = input,
+                    context = getApplication(),
+                    settings = _settings.value,
+                    onProgressState = { progress ->
+                        _fetchingProgress.value = progress
+                        _fetchingStatusMessage.value = progress.detail
+                    },
+                    onProgress = { status ->
+                        _fetchingStatusMessage.value = status
+                    }
+                )
+
+                fetchResult.fold(
+                    onSuccess = { topNodes ->
+                        if (_settings.value.subReplaceExisting) {
+                            dao.deleteFetchedServers()
+                        }
+                        dao.clearSelection()
+                        val marked = topNodes.mapIndexed { index, srv ->
+                            srv.copy(isSelected = index == 0)
+                        }
+                        dao.insertServers(marked)
+                        val fastest = marked.firstOrNull()
+                        if (fastest != null) {
+                            val ip = fletcher.resolveServerIpAddress(fastest.host)
+                            _telemetry.update { it.copy(serverIpLabel = ip) }
+                        }
+                        if (_currentScreen.value == VpnScreen.SPLASH_FETCHING) {
+                            _screenStack.value = listOf(VpnScreen.CONNECTED_HOME, VpnScreen.SERVER_LIST)
+                            _currentScreen.value = VpnScreen.SERVER_LIST
+                        }
+                        val countryCount = marked.map { it.countryName }.distinct().size
+                        showMessage(
+                            "Saved ${marked.size} verified servers across $countryCount countries · Fastest: ${fastest?.countryName ?: ""} (${fastest?.pingMs ?: 0} ms)"
+                        )
+                    },
+                    onFailure = { err ->
+                        if (_currentScreen.value == VpnScreen.SPLASH_FETCHING) {
+                            _currentScreen.value = VpnScreen.ADD_SERVER
+                        }
+                        showMessage("Could not fetch servers: ${err.message}")
+                    }
+                )
+            } finally {
+                _fetchingProgress.value = FetchingProgressState(isActive = false, stage = FetchingStage.IDLE)
+            }
         }
     }
 

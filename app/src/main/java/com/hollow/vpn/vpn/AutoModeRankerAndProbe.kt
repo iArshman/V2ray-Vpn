@@ -169,8 +169,8 @@ object BetaSourceScorer {
  */
 object ThroughputProbe {
 
-    private const val PROBE_URL = "https://speed.cloudflare.com/__down?bytes=2000000"
-    private const val MAX_PROBE_MILLIS = 4_500L
+    private const val PROBE_URL = "https://speed.cloudflare.com/__down?bytes=1500000"
+    private const val MAX_PROBE_MILLIS = 2_600L
     const val ACCEPT_BASELINE_FRACTION = 0.70
 
     fun currentNetworkKey(context: Context): String {

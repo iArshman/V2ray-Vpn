@@ -1,9 +1,15 @@
 package com.hollow.vpn.ui.screens
 
 import androidx.activity.compose.BackHandler
+import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.Crossfade
 import androidx.compose.animation.animateColorAsState
+import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.tween
+import androidx.compose.animation.expandVertically
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.shrinkVertically
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -12,6 +18,8 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.IntrinsicSize
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -30,9 +38,11 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.rounded.ArrowForward
 import androidx.compose.material.icons.automirrored.rounded.KeyboardArrowRight
 import androidx.compose.material.icons.rounded.Add
 import androidx.compose.material.icons.rounded.Check
+import androidx.compose.material.icons.rounded.KeyboardArrowDown
 import androidx.compose.material.icons.rounded.MoreVert
 import androidx.compose.material.icons.rounded.Refresh
 import androidx.compose.material3.Checkbox
@@ -43,7 +53,9 @@ import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -58,6 +70,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
@@ -69,6 +82,8 @@ import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.hollow.vpn.R
+import com.hollow.vpn.data.FetchingProgressState
+import com.hollow.vpn.data.FetchingStage
 import com.hollow.vpn.data.ServerEntity
 import com.hollow.vpn.ui.ConnectionTelemetryState
 import com.hollow.vpn.ui.components.FetchingSpinnerRing
@@ -156,17 +171,36 @@ private fun formatCompactTotalBytes(bytes: Long): String {
 }
 
 /**
- * SCREEN 1: Hollow Startup Auto-Fetch & Ping Ranker Splash Screen
+ * SCREEN 1: Hollow Startup & Subscription Streaming Pipeline Fetching Screen
  */
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 fun SplashFetchingScreen(
     statusSubtitle: String,
+    progress: FetchingProgressState = FetchingProgressState(isActive = true, detail = statusSubtitle),
     onCancelOrSkip: () -> Unit
 ) {
     BackHandler { onCancelOrSkip() }
-    val displaySubtitle = statusSubtitle
+    val rawDetail = progress.detail.ifBlank { statusSubtitle }
+    val displaySubtitle = rawDetail
         .replace("V2Ray / Xray ", "", ignoreCase = true)
         .replace("V2Ray/Xray ", "", ignoreCase = true)
+
+    val rawProgressFraction = when (progress.stage) {
+        FetchingStage.DOWNLOADING -> 0.14f
+        FetchingStage.TESTING_PIPELINE -> {
+            val total = progress.targetTotalCount.coerceAtLeast(1)
+            (0.18f + 0.62f * (progress.testedCount.toFloat() / total.toFloat())).coerceIn(0.18f, 0.80f)
+        }
+        FetchingStage.SPEED_AND_GEO -> 0.88f
+        FetchingStage.FINALIZING -> 1.0f
+        FetchingStage.IDLE -> 0.12f
+    }
+    val animatedProgress by animateFloatAsState(
+        targetValue = rawProgressFraction,
+        animationSpec = tween(durationMillis = 320),
+        label = "fetch_pipeline_progress"
+    )
 
     Box(
         modifier = Modifier
@@ -180,82 +214,413 @@ fun SplashFetchingScreen(
                 .fillMaxSize()
                 .widthIn(max = 520.dp)
                 .align(Alignment.Center)
-                .padding(horizontal = 28.dp),
-            horizontalAlignment = Alignment.CenterHorizontally,
-            verticalArrangement = Arrangement.Center
+                .padding(horizontal = 22.dp, vertical = 14.dp),
+            horizontalAlignment = Alignment.CenterHorizontally
         ) {
-            Spacer(modifier = Modifier.weight(1f))
+            // Top bar: Brand + Live Pipeline status on left, Hide button on right
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(10.dp)
+                ) {
+                    HollowBrandShieldLogo(size = 34.dp, cornerRadius = 10.dp)
+                    Column {
+                        Text(
+                            text = stringResource(R.string.app_name),
+                            fontFamily = SpaceGroteskFamily,
+                            fontWeight = FontWeight.Bold,
+                            fontSize = 16.sp,
+                            color = HollowInk
+                        )
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(5.dp)
+                        ) {
+                            HollowBlinkingDot(color = HollowOrange)
+                            Text(
+                                text = "LIVE PIPELINE",
+                                fontFamily = JetBrainsMonoFamily,
+                                fontWeight = FontWeight.Medium,
+                                fontSize = 10.sp,
+                                letterSpacing = 0.8.sp,
+                                color = HollowInkSecondary
+                            )
+                        }
+                    }
+                }
 
-            HollowBrandShieldLogo(size = 86.dp, cornerRadius = 24.dp)
+                Surface(
+                    shape = RoundedCornerShape(999.dp),
+                    color = HollowCreamSurface,
+                    border = BorderStroke(1.dp, HollowCreamDivider),
+                    modifier = Modifier
+                        .minimumInteractiveComponentSize()
+                        .clip(RoundedCornerShape(999.dp))
+                        .clickable(role = Role.Button, onClick = onCancelOrSkip)
+                        .testTag("btn_hide_fetching_top")
+                ) {
+                    Row(
+                        modifier = Modifier.padding(horizontal = 14.dp, vertical = 8.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(4.dp)
+                    ) {
+                        Icon(
+                            imageVector = Icons.Rounded.KeyboardArrowDown,
+                            contentDescription = "Hide",
+                            tint = HollowInk,
+                            modifier = Modifier.size(17.dp)
+                        )
+                        Text(
+                            text = "Hide",
+                            fontFamily = SpaceGroteskFamily,
+                            fontWeight = FontWeight.SemiBold,
+                            fontSize = 13.5.sp,
+                            color = HollowInk
+                        )
+                    }
+                }
+            }
 
-            Spacer(modifier = Modifier.height(22.dp))
+            Spacer(modifier = Modifier.height(12.dp))
 
-            Text(
-                text = stringResource(R.string.app_name),
-                fontFamily = SpaceGroteskFamily,
-                fontWeight = FontWeight.Bold,
-                fontSize = 32.sp,
-                color = HollowInk
-            )
-
-            Spacer(modifier = Modifier.height(6.dp))
-
-            Text(
-                text = stringResource(R.string.tagline_fast_private),
-                style = MaterialTheme.typography.bodyLarge,
-                color = HollowInkSecondary,
-                textAlign = TextAlign.Center
-            )
-
-            Spacer(modifier = Modifier.height(36.dp))
-
+            Column(
+                modifier = Modifier
+                    .weight(1f)
+                    .fillMaxWidth()
+                    .verticalScroll(rememberScrollState()),
+                verticalArrangement = Arrangement.Center,
+                horizontalAlignment = Alignment.CenterHorizontally
+            ) {
+            // Main Editorial Pipeline Card
             Surface(
                 modifier = Modifier.fillMaxWidth(),
-                shape = RoundedCornerShape(22.dp),
-                color = HollowCreamSurface
+                shape = RoundedCornerShape(24.dp),
+                color = HollowCreamSurface,
+                border = BorderStroke(1.dp, HollowCreamDivider)
             ) {
                 Column(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .padding(horizontal = 24.dp, vertical = 24.dp),
+                        .padding(horizontal = 20.dp, vertical = 22.dp),
                     horizontalAlignment = Alignment.CenterHorizontally
                 ) {
-                    FetchingSpinnerRing(size = 60.dp)
+                    FetchingSpinnerRing(size = 64.dp)
 
-                    Spacer(modifier = Modifier.height(16.dp))
+                    Spacer(modifier = Modifier.height(14.dp))
 
                     Text(
-                        text = stringResource(R.string.fetching_servers_title),
-                        style = MaterialTheme.typography.titleMedium,
-                        color = HollowInk
+                        text = progress.headline.ifBlank { stringResource(R.string.fetching_servers_title) },
+                        fontFamily = SpaceGroteskFamily,
+                        fontWeight = FontWeight.Bold,
+                        fontSize = 20.sp,
+                        color = HollowInk,
+                        textAlign = TextAlign.Center
                     )
 
-                    Spacer(modifier = Modifier.height(6.dp))
+                    Spacer(modifier = Modifier.height(5.dp))
 
                     Text(
                         text = displaySubtitle,
-                        style = MaterialTheme.typography.bodyMedium,
+                        style = MaterialTheme.typography.bodyMedium.copy(fontSize = 13.sp),
                         color = HollowInkSecondary,
-                        textAlign = TextAlign.Center
+                        textAlign = TextAlign.Center,
+                        maxLines = 2,
+                        overflow = TextOverflow.Ellipsis
                     )
+
+                    Spacer(modifier = Modifier.height(16.dp))
+
+                    // Progress track
+                    if (progress.stage == FetchingStage.DOWNLOADING && progress.parsedCount == 0) {
+                        HollowIndeterminateBar(
+                            color = HollowOrange,
+                            track = HollowCreamDivider,
+                            modifier = Modifier.fillMaxWidth()
+                        )
+                    } else {
+                        LinearProgressIndicator(
+                            progress = { animatedProgress },
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .height(6.dp)
+                                .clip(RoundedCornerShape(3.dp)),
+                            color = if (progress.workingCount > 0) HollowForest else HollowOrange,
+                            trackColor = HollowCreamDivider,
+                            strokeCap = StrokeCap.Round
+                        )
+                    }
+
+                    Spacer(modifier = Modifier.height(16.dp))
+
+                    // Dual-Lane Concurrent Pipeline Strip: FETCH -> TEST
+                    Surface(
+                        modifier = Modifier.fillMaxWidth(),
+                        shape = RoundedCornerShape(16.dp),
+                        color = HollowCream,
+                        border = BorderStroke(1.dp, HollowCreamDivider)
+                    ) {
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(horizontal = 14.dp, vertical = 12.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.SpaceBetween
+                        ) {
+                            Column(modifier = Modifier.weight(1f)) {
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                                ) {
+                                    HollowBlinkingDot(color = HollowOrange)
+                                    Text(
+                                        text = "FETCH",
+                                        fontFamily = JetBrainsMonoFamily,
+                                        fontWeight = FontWeight.Bold,
+                                        fontSize = 10.5.sp,
+                                        letterSpacing = 0.8.sp,
+                                        color = HollowInkSecondary
+                                    )
+                                }
+                                Spacer(modifier = Modifier.height(3.dp))
+                                Text(
+                                    text = "${progress.parsedCount} parsed",
+                                    fontFamily = JetBrainsMonoFamily,
+                                    fontWeight = FontWeight.SemiBold,
+                                    fontSize = 13.sp,
+                                    color = HollowInk
+                                )
+                            }
+
+                            Icon(
+                                imageVector = Icons.AutoMirrored.Rounded.ArrowForward,
+                                contentDescription = null,
+                                tint = HollowInkSecondary,
+                                modifier = Modifier
+                                    .padding(horizontal = 8.dp)
+                                    .size(16.dp)
+                            )
+
+                            Column(
+                                modifier = Modifier.weight(1f),
+                                horizontalAlignment = Alignment.End
+                            ) {
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                                ) {
+                                    HollowBlinkingDot(
+                                        color = if (progress.workingCount > 0) HollowForest else HollowOrange
+                                    )
+                                    Text(
+                                        text = "TEST",
+                                        fontFamily = JetBrainsMonoFamily,
+                                        fontWeight = FontWeight.Bold,
+                                        fontSize = 10.5.sp,
+                                        letterSpacing = 0.8.sp,
+                                        color = HollowInkSecondary
+                                    )
+                                }
+                                Spacer(modifier = Modifier.height(3.dp))
+                                Text(
+                                    text = "${progress.workingCount} ready · ${progress.testedCount} probed",
+                                    fontFamily = JetBrainsMonoFamily,
+                                    fontWeight = FontWeight.SemiBold,
+                                    fontSize = 13.sp,
+                                    color = if (progress.workingCount > 0) HollowForest else HollowInk,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
+                                )
+                            }
+                        }
+                    }
+
+                    Spacer(modifier = Modifier.height(14.dp))
+
+                    // 3-Column Live Metrics Strip
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(IntrinsicSize.Min),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        FetchingMetricCell(
+                            label = "REACHABLE",
+                            value = "${progress.reachableCount}",
+                            valueColor = HollowInk,
+                            modifier = Modifier.weight(1f)
+                        )
+                        VerticalDivider(
+                            thickness = 1.dp,
+                            color = HollowCreamDivider,
+                            modifier = Modifier.padding(vertical = 4.dp)
+                        )
+                        FetchingMetricCell(
+                            label = "WORKING",
+                            value = "${progress.workingCount}",
+                            valueColor = if (progress.workingCount > 0) HollowForest else HollowInk,
+                            modifier = Modifier.weight(1f)
+                        )
+                        VerticalDivider(
+                            thickness = 1.dp,
+                            color = HollowCreamDivider,
+                            modifier = Modifier.padding(vertical = 4.dp)
+                        )
+                        FetchingMetricCell(
+                            label = "FASTEST",
+                            value = if (progress.fastestPingMs > 0) "${progress.fastestPingMs}ms" else "—",
+                            valueColor = if (progress.fastestPingMs > 0) HollowForest else HollowInkSecondary,
+                            modifier = Modifier.weight(1f)
+                        )
+                    }
+
+                    // Live Discovered Country Flags
+                    AnimatedVisibility(
+                        visible = progress.discoveredCountries.isNotEmpty(),
+                        enter = fadeIn() + expandVertically(),
+                        exit = fadeOut() + shrinkVertically()
+                    ) {
+                        Column(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(top = 14.dp),
+                            horizontalAlignment = Alignment.CenterHorizontally
+                        ) {
+                            HorizontalDivider(thickness = 1.dp, color = HollowCreamDivider)
+                            Spacer(modifier = Modifier.height(10.dp))
+                            Text(
+                                text = "DISCOVERED LOCATIONS (${progress.countryCount})",
+                                fontFamily = JetBrainsMonoFamily,
+                                fontWeight = FontWeight.Medium,
+                                fontSize = 10.sp,
+                                letterSpacing = 0.9.sp,
+                                color = HollowInkSecondary
+                            )
+                            Spacer(modifier = Modifier.height(8.dp))
+                            FlowRow(
+                                horizontalArrangement = Arrangement.spacedBy(6.dp, Alignment.CenterHorizontally),
+                                verticalArrangement = Arrangement.spacedBy(6.dp),
+                                modifier = Modifier.fillMaxWidth()
+                            ) {
+                                progress.discoveredCountries.take(8).forEach { (code, _) ->
+                                    Surface(
+                                        shape = RoundedCornerShape(999.dp),
+                                        color = HollowCream,
+                                        border = BorderStroke(1.dp, HollowCreamDivider)
+                                    ) {
+                                        Row(
+                                            modifier = Modifier.padding(horizontal = 9.dp, vertical = 4.dp),
+                                            verticalAlignment = Alignment.CenterVertically,
+                                            horizontalArrangement = Arrangement.spacedBy(4.dp)
+                                        ) {
+                                            Text(
+                                                text = countryCodeToFlagEmoji(code),
+                                                fontSize = 13.sp
+                                            )
+                                            Text(
+                                                text = code,
+                                                fontFamily = JetBrainsMonoFamily,
+                                                fontWeight = FontWeight.SemiBold,
+                                                fontSize = 11.sp,
+                                                color = HollowInk
+                                            )
+                                        }
+                                    }
+                                }
+                                val extraCountries = progress.countryCount - progress.discoveredCountries.take(8).size
+                                if (extraCountries > 0) {
+                                    Surface(
+                                        shape = RoundedCornerShape(999.dp),
+                                        color = HollowCream,
+                                        border = BorderStroke(1.dp, HollowCreamDivider)
+                                    ) {
+                                        Text(
+                                            text = "+$extraCountries",
+                                            fontFamily = JetBrainsMonoFamily,
+                                            fontWeight = FontWeight.SemiBold,
+                                            fontSize = 11.sp,
+                                            color = HollowInkSecondary,
+                                            modifier = Modifier.padding(horizontal = 9.dp, vertical = 4.dp)
+                                        )
+                                    }
+                                }
+                            }
+                        }
+                    }
                 }
             }
 
-            Spacer(modifier = Modifier.height(18.dp))
+            Spacer(modifier = Modifier.height(16.dp))
 
-            TextButton(
+            OutlinedButton(
                 onClick = onCancelOrSkip,
-                modifier = Modifier.minimumInteractiveComponentSize()
+                shape = RoundedCornerShape(16.dp),
+                border = BorderStroke(1.2.dp, HollowInk),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(50.dp)
+                    .testTag("btn_hide_fetching")
             ) {
+                Icon(
+                    imageVector = Icons.Rounded.KeyboardArrowDown,
+                    contentDescription = null,
+                    tint = HollowInk,
+                    modifier = Modifier.size(18.dp)
+                )
+                Spacer(modifier = Modifier.width(6.dp))
                 Text(
-                    text = "Browse Servers",
-                    color = HollowInk,
-                    fontWeight = FontWeight.SemiBold
+                    text = "Hide",
+                    fontFamily = SpaceGroteskFamily,
+                    fontWeight = FontWeight.SemiBold,
+                    fontSize = 15.5.sp,
+                    color = HollowInk
                 )
             }
 
-            Spacer(modifier = Modifier.weight(1f))
+            Spacer(modifier = Modifier.height(6.dp))
+
+            Text(
+                text = "Runs in background — keep using Hollow while servers verify",
+                style = MaterialTheme.typography.bodySmall.copy(fontSize = 11.5.sp),
+                color = HollowInkSecondary,
+                textAlign = TextAlign.Center
+            )
+            }
         }
+    }
+}
+
+@Composable
+private fun FetchingMetricCell(
+    label: String,
+    value: String,
+    valueColor: Color,
+    modifier: Modifier = Modifier
+) {
+    Column(
+        modifier = modifier.padding(horizontal = 4.dp),
+        horizontalAlignment = Alignment.CenterHorizontally
+    ) {
+        Text(
+            text = label,
+            fontFamily = JetBrainsMonoFamily,
+            fontWeight = FontWeight.Medium,
+            fontSize = 10.sp,
+            letterSpacing = 0.7.sp,
+            color = HollowInkSecondary
+        )
+        Spacer(modifier = Modifier.height(3.dp))
+        Text(
+            text = value,
+            fontFamily = JetBrainsMonoFamily,
+            fontWeight = FontWeight.Bold,
+            fontSize = 16.sp,
+            color = valueColor,
+            maxLines = 1
+        )
     }
 }
 

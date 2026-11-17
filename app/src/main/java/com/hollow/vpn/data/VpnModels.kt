@@ -66,6 +66,30 @@ enum class ServerFilter(val label: String) {
     HIGH_SPEED("High Speed")
 }
 
+enum class FetchingStage {
+    IDLE,
+    DOWNLOADING,
+    TESTING_PIPELINE,
+    SPEED_AND_GEO,
+    FINALIZING
+}
+
+data class FetchingProgressState(
+    val isActive: Boolean = false,
+    val stage: FetchingStage = FetchingStage.IDLE,
+    val headline: String = "Syncing servers…",
+    val detail: String = "Auto configuring for you",
+    val parsedCount: Int = 0,
+    val probedCount: Int = 0,
+    val reachableCount: Int = 0,
+    val testedCount: Int = 0,
+    val workingCount: Int = 0,
+    val targetTotalCount: Int = 0,
+    val countryCount: Int = 0,
+    val fastestPingMs: Int = 0,
+    val discoveredCountries: List<Pair<String, String>> = emptyList()
+)
+
 sealed interface AppUpdateState {
     data object Idle : AppUpdateState
     data object Checking : AppUpdateState

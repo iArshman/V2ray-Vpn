@@ -5,12 +5,17 @@ import android.provider.Settings
 import android.util.Base64
 import com.hollow.vpn.data.AppSettingsState
 import com.hollow.vpn.data.AppUpdateState
+import com.hollow.vpn.data.FetchingProgressState
+import com.hollow.vpn.data.FetchingStage
 import com.hollow.vpn.data.ServerEntity
+import com.hollow.vpn.data.SubscriptionEntity
 import go.Seq
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withContext
@@ -28,10 +33,12 @@ import java.net.Socket
 import java.net.URLDecoder
 import java.security.MessageDigest
 import java.util.Locale
+import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.ConcurrentLinkedQueue
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
-import com.hollow.vpn.data.SubscriptionEntity
+import java.util.concurrent.atomic.AtomicLong
 import kotlin.math.abs
 import kotlin.system.measureTimeMillis
 
@@ -57,17 +64,19 @@ data class PublicIpInfo(
 class V2RayParserAndFletcher {
 
     private val httpClient = OkHttpClient.Builder()
-        .connectTimeout(10, TimeUnit.SECONDS)
-        .readTimeout(12, TimeUnit.SECONDS)
+        .connectTimeout(8, TimeUnit.SECONDS)
+        .readTimeout(10, TimeUnit.SECONDS)
         .followRedirects(true)
         .build()
 
     private val geoHttpClient = OkHttpClient.Builder()
-        .connectTimeout(5, TimeUnit.SECONDS)
-        .readTimeout(5, TimeUnit.SECONDS)
+        .connectTimeout(3, TimeUnit.SECONDS)
+        .readTimeout(3, TimeUnit.SECONDS)
         .build()
 
     private val resilientFetcher = ResilientFetcher(httpClient)
+    private val resolvedIpCache = ConcurrentHashMap<String, String>()
+    private val geoIpCache = ConcurrentHashMap<String, Pair<String, String>>()
 
     @Volatile
     private var coreEnvInitialized = false
@@ -84,6 +93,7 @@ class V2RayParserAndFletcher {
         subscriptionUrl: String,
         context: Context? = null,
         settings: AppSettingsState = AppSettingsState(),
+        onProgressState: (FetchingProgressState) -> Unit = {},
         onProgress: (String) -> Unit = {}
     ): Result<List<ServerEntity>> = withContext(Dispatchers.IO) {
         try {
@@ -91,51 +101,16 @@ class V2RayParserAndFletcher {
             require(cleanUrl.startsWith("http://") || cleanUrl.startsWith("https://")) {
                 "Subscription link must start with https:// or http://"
             }
-            onProgress("Downloading live subscription feed…")
-            val fetchOutcome = resilientFetcher.fetchSubscriptionText(
-                url = cleanUrl,
-                context = context,
-                mirrorsEnabled = settings.mirrorsEnabled
-            ).getOrElse { err ->
-                return@withContext Result.failure(err)
-            }
 
-            if (fetchOutcome.fromCache) {
-                onProgress("Using cached subscription list…")
-            } else {
-                onProgress("Optimizing available locations (${fetchOutcome.routeLabel})…")
-            }
-
-            val parsedNodes = parseImportPayload(
-                rawInput = fetchOutcome.body,
-                subscriptionUrl = cleanUrl,
-                isCustom = false
-            )
-            if (parsedNodes.isEmpty()) {
-                return@withContext Result.failure(
-                    IllegalArgumentException("No valid server nodes found at this URL.")
-                )
-            }
-
-            val diverseCandidates = selectDiverseCandidatePool(parsedNodes, maxCandidates = 360)
-
-            onProgress("Testing ${diverseCandidates.size} global servers…")
-            val rankedServers = benchmarkAndRankTop15(
-                servers = diverseCandidates,
+            runStreamingFetchAndBenchmarkPipeline(
+                urls = listOf(cleanUrl),
+                subscriptions = emptyList(),
                 context = context,
                 settings = settings,
+                maxCandidates = 340,
+                onProgressState = onProgressState,
                 onProgress = onProgress
             )
-
-            if (rankedServers.isEmpty()) {
-                return@withContext Result.failure(
-                    IllegalStateException(
-                        "Tested ${diverseCandidates.size} nodes from subscription, but none passed proxy connectivity checks."
-                    )
-                )
-            }
-
-            Result.success(rankedServers)
         } catch (e: Exception) {
             Result.failure(e)
         }
@@ -146,82 +121,461 @@ class V2RayParserAndFletcher {
         fallbackUrls: List<String> = emptyList(),
         context: Context? = null,
         settings: AppSettingsState = AppSettingsState(),
+        onProgressState: (FetchingProgressState) -> Unit = {},
         onProgress: (String) -> Unit = {},
         onSubscriptionStats: suspend (SubscriptionEntity, Boolean, Int) -> Unit = { _, _, _ -> }
     ): Result<List<ServerEntity>> = withContext(Dispatchers.IO) {
         try {
             val orderedSubs = BetaSourceScorer.orderSources(subscriptions).take(8)
-            val aggregated = mutableListOf<ServerEntity>()
-            var lastError: Throwable? = null
+            val fallback = if (orderedSubs.isEmpty()) fallbackUrls.distinct().take(8) else emptyList()
 
-            if (orderedSubs.isNotEmpty()) {
-                for ((idx, sub) in orderedSubs.withIndex()) {
-                    onProgress("Fetching feed ${idx + 1}/${orderedSubs.size}…")
-                    val outcome = resilientFetcher.fetchSubscriptionText(
-                        url = sub.url,
-                        context = context,
-                        mirrorsEnabled = settings.mirrorsEnabled
-                    )
-                    outcome.fold(
-                        onSuccess = { fetched ->
-                            val parsed = parseImportPayload(
-                                rawInput = fetched.body,
-                                subscriptionUrl = sub.url,
-                                isCustom = false
-                            )
-                            aggregated += parsed
-                            onSubscriptionStats(sub, parsed.isNotEmpty(), parsed.size)
-                        },
-                        onFailure = { err ->
-                            lastError = err
-                            onSubscriptionStats(sub, false, 0)
-                        }
-                    )
-                }
-            } else {
-                for (url in fallbackUrls.distinct().take(8)) {
-                    onProgress("Downloading subscription feed…")
-                    val outcome = resilientFetcher.fetchSubscriptionText(
-                        url = url,
-                        context = context,
-                        mirrorsEnabled = settings.mirrorsEnabled
-                    )
-                    outcome.fold(
-                        onSuccess = { fetched ->
-                            aggregated += parseImportPayload(
-                                rawInput = fetched.body,
-                                subscriptionUrl = url,
-                                isCustom = false
-                            )
-                        },
-                        onFailure = { err -> lastError = err }
-                    )
-                }
-            }
-
-            if (aggregated.isEmpty()) {
-                return@withContext Result.failure(
-                    lastError ?: IllegalArgumentException("No valid server nodes found in configured subscriptions.")
-                )
-            }
-
-            val diverseCandidates = selectDiverseCandidatePool(aggregated, maxCandidates = 420)
-            onProgress("Testing ${diverseCandidates.size} candidate servers…")
-            val rankedServers = benchmarkAndRankTop15(
-                servers = diverseCandidates,
+            runStreamingFetchAndBenchmarkPipeline(
+                urls = fallback,
+                subscriptions = orderedSubs,
                 context = context,
                 settings = settings,
-                onProgress = onProgress
+                maxCandidates = 380,
+                onProgressState = onProgressState,
+                onProgress = onProgress,
+                onSubscriptionStats = onSubscriptionStats
             )
-            if (rankedServers.isEmpty()) {
-                return@withContext Result.failure(
-                    IllegalStateException("Tested ${diverseCandidates.size} nodes, but none passed proxy verification.")
-                )
-            }
-            Result.success(rankedServers)
         } catch (e: Exception) {
             Result.failure(e)
         }
+    }
+
+    /**
+     * Concurrent Producer-Consumer Pipeline:
+     * - Producer(s) stream/download feeds in parallel and immediately push subnet-diverse nodes into [rawChannel].
+     * - 48 TCP pre-filter workers immediately test reachability and stream live survivors into [xrayChannel].
+     * - 24 Xray workers verify real proxy handshakes simultaneously while feeds are still downloading.
+     * - Speed testing (top 3) + GeoIP resolution (Semaphore 20 + in-memory cache) execute concurrently at the end.
+     */
+    private suspend fun runStreamingFetchAndBenchmarkPipeline(
+        urls: List<String>,
+        subscriptions: List<SubscriptionEntity>,
+        context: Context?,
+        settings: AppSettingsState,
+        maxCandidates: Int,
+        onProgressState: (FetchingProgressState) -> Unit,
+        onProgress: (String) -> Unit,
+        onSubscriptionStats: suspend (SubscriptionEntity, Boolean, Int) -> Unit = { _, _, _ -> }
+    ): Result<List<ServerEntity>> = coroutineScope {
+        val baselineJob = if (context != null) {
+            async(Dispatchers.IO) { ThroughputProbe.measureOrLoadBaselineMbps(context) }
+        } else null
+
+        val rawChannel = Channel<ServerEntity>(capacity = 512)
+        val xrayChannel = Channel<ServerEntity>(capacity = 256)
+
+        val parsedCount = AtomicInteger(0)
+        val queuedCount = AtomicInteger(0)
+        val probedCount = AtomicInteger(0)
+        val reachableCount = AtomicInteger(0)
+        val xrayQueuedCount = AtomicInteger(0)
+        val testedCount = AtomicInteger(0)
+        val workingCount = AtomicInteger(0)
+        val fastestPing = AtomicInteger(0)
+        val lastEmitMs = AtomicLong(0L)
+        val nativeMissing = AtomicBoolean(false)
+        val fetchDone = AtomicBoolean(false)
+
+        val seenKeys = ConcurrentHashMap.newKeySet<String>()
+        val subnetCounts = ConcurrentHashMap<String, AtomicInteger>()
+        val countryHintCounts = ConcurrentHashMap<String, AtomicInteger>()
+        val cfSniSeen = ConcurrentHashMap.newKeySet<String>()
+        val workingServers = ConcurrentLinkedQueue<ServerEntity>()
+        val discoveredCountries = ConcurrentHashMap<String, String>()
+
+        fun updateDiscoveredCountry(code: String?, name: String?) {
+            val cleanCode = code?.trim()?.uppercase().orEmpty()
+            if (cleanCode.length == 2 && cleanCode != "XX") {
+                val resolvedName = name?.takeIf { it.isNotBlank() && !it.startsWith("Resolving", ignoreCase = true) }
+                    ?: countryNameFromIsoCode(cleanCode)
+                discoveredCountries.putIfAbsent(cleanCode, resolvedName)
+            }
+        }
+
+        fun emitProgress(
+            stage: FetchingStage,
+            headline: String,
+            detail: String,
+            force: Boolean = false
+        ) {
+            val nowMs = System.currentTimeMillis()
+            val prev = lastEmitMs.get()
+            if (!force && nowMs - prev < 110L) return
+            if (!force && !lastEmitMs.compareAndSet(prev, nowMs)) return
+            if (force) lastEmitMs.set(nowMs)
+
+            val countriesSnapshot = discoveredCountries.entries
+                .take(10)
+                .map { it.key to it.value }
+
+            val targetTotal = maxOf(
+                xrayQueuedCount.get(),
+                queuedCount.get().coerceAtMost(maxCandidates)
+            ).coerceAtLeast(1)
+
+            onProgress(detail)
+            onProgressState(
+                FetchingProgressState(
+                    isActive = true,
+                    stage = stage,
+                    headline = headline,
+                    detail = detail,
+                    parsedCount = parsedCount.get(),
+                    probedCount = probedCount.get(),
+                    reachableCount = reachableCount.get(),
+                    testedCount = testedCount.get(),
+                    workingCount = workingCount.get(),
+                    targetTotalCount = targetTotal,
+                    countryCount = discoveredCountries.size,
+                    fastestPingMs = fastestPing.get(),
+                    discoveredCountries = countriesSnapshot
+                )
+            )
+        }
+
+        emitProgress(
+            stage = FetchingStage.DOWNLOADING,
+            headline = "Fetching & testing live",
+            detail = "Connecting to subscription feed…",
+            force = true
+        )
+
+        var lastFetchError: Throwable? = null
+        val feedItems: List<Pair<String, SubscriptionEntity?>> = if (subscriptions.isNotEmpty()) {
+            subscriptions.map { it.url to it }
+        } else {
+            urls.map { it to null }
+        }
+
+        suspend fun processStreamedBatch(batchText: String, subUrl: String): Int {
+            val rawParsed = parseImportPayload(
+                rawInput = batchText,
+                subscriptionUrl = subUrl,
+                isCustom = false
+            )
+            if (rawParsed.isEmpty()) return 0
+
+            val validNodes = rawParsed.filter { server ->
+                server.host.isNotBlank() &&
+                    !server.host.contains(" ") &&
+                    server.port in 1..65535 &&
+                    server.uuidOrPassword.isNotBlank() &&
+                    !(server.transport.equals("Reality", ignoreCase = true) && server.publicKey.isBlank())
+            }
+            if (validNodes.isEmpty()) return 0
+
+            val policyFiltered = if (settings.strictTlsEnabled) {
+                validNodes.filter { SecurityPolicy.isServerSecure(it) }.ifEmpty { validNodes }
+            } else {
+                validNodes
+            }
+
+            val prioritized = ProtocolRanker.prioritizeCandidates(policyFiltered)
+            var acceptedInBatch = 0
+
+            for (candidate in prioritized) {
+                parsedCount.incrementAndGet()
+                val key = "${candidate.protocolCore.lowercase()}:${candidate.host.lowercase()}:${candidate.port}:${candidate.uuidOrPassword}:${candidate.sni.lowercase()}"
+                if (!seenKeys.add(key)) continue
+
+                if (queuedCount.get() >= maxCandidates) continue
+
+                val isCf = isCloudflareAnycastHost(candidate.host)
+                if (isCf) {
+                    val cfKey = "${candidate.sni.ifBlank { candidate.host }}:${candidate.uuidOrPassword}"
+                    if (!cfSniSeen.add(cfKey)) continue
+                    if (cfSniSeen.size > 36) continue
+                } else {
+                    val parts = candidate.host.split(".")
+                    val subnetKey = if (parts.size == 4 && parts[0].toIntOrNull() != null) {
+                        "${parts[0]}.${parts[1]}"
+                    } else {
+                        candidate.host.takeLast(8).lowercase()
+                    }
+                    val countForSubnet = subnetCounts.computeIfAbsent(subnetKey) { AtomicInteger(0) }.incrementAndGet()
+                    if (countForSubnet > 8) continue
+                }
+
+                val hintCode = candidate.countryCode.takeIf { it.length == 2 && it != "XX" }
+                    ?: detectExplicitCountryCode("${candidate.countryName} ${candidate.sni} ${candidate.host}")
+                if (hintCode != null) {
+                    val hintCount = countryHintCounts.computeIfAbsent(hintCode) { AtomicInteger(0) }.incrementAndGet()
+                    if (hintCount > 18) continue
+                }
+
+                queuedCount.incrementAndGet()
+                acceptedInBatch++
+                rawChannel.send(candidate)
+            }
+
+            emitProgress(
+                stage = if (testedCount.get() > 0) FetchingStage.TESTING_PIPELINE else FetchingStage.DOWNLOADING,
+                headline = if (testedCount.get() > 0) "Fetching & testing simultaneously" else "Streaming server list…",
+                detail = "Parsed ${parsedCount.get()} · Testing ${queuedCount.get()} · ${workingCount.get()} ready"
+            )
+            return acceptedInBatch
+        }
+
+        val producerJob = launch(Dispatchers.IO) {
+            try {
+                val feedSem = Semaphore(4)
+                feedItems.map { (feedUrl, subEntity) ->
+                    async(Dispatchers.IO) {
+                        feedSem.withPermit {
+                            val outcome = resilientFetcher.fetchSubscriptionStreaming(
+                                url = feedUrl,
+                                context = context,
+                                mirrorsEnabled = settings.mirrorsEnabled,
+                                onRouteSelected = { route ->
+                                    val msg = if (route == "local-cache") {
+                                        "Loaded cached feed · testing live nodes…"
+                                    } else {
+                                        "Streaming feed ($route) · testing in parallel…"
+                                    }
+                                    emitProgress(FetchingStage.TESTING_PIPELINE, "Fetching & testing live", msg)
+                                },
+                                onBatchText = { batch ->
+                                    processStreamedBatch(batch, feedUrl)
+                                }
+                            )
+                            outcome.fold(
+                                onSuccess = { fetched ->
+                                    if (subEntity != null) {
+                                        onSubscriptionStats(subEntity, true, parsedCount.get())
+                                    }
+                                    if (fetched.fromCache) {
+                                        emitProgress(
+                                            FetchingStage.TESTING_PIPELINE,
+                                            "Testing cached servers",
+                                            "Using cached list · verifying ${queuedCount.get()} servers…"
+                                        )
+                                    }
+                                },
+                                onFailure = { err ->
+                                    lastFetchError = err
+                                    if (subEntity != null) {
+                                        onSubscriptionStats(subEntity, false, 0)
+                                    }
+                                }
+                            )
+                        }
+                    }
+                }.awaitAll()
+            } finally {
+                fetchDone.set(true)
+                rawChannel.close()
+            }
+        }
+
+        // Consumer Pool 1: 48 parallel TCP pre-filter workers feed live survivors straight into xrayChannel
+        val tcpWorkersJob = launch(Dispatchers.IO) {
+            try {
+                val tcpWorkers = List(48) {
+                    launch(Dispatchers.IO) {
+                        for (server in rawChannel) {
+                            val isUdp = server.protocolCore.contains("Hysteria", ignoreCase = true) ||
+                                server.protocolCore.contains("WireGuard", ignoreCase = true)
+
+                            if (isUdp) {
+                                val done = probedCount.incrementAndGet()
+                                val alive = reachableCount.incrementAndGet()
+                                if (xrayQueuedCount.incrementAndGet() <= 160 && workingCount.get() < 90) {
+                                    xrayChannel.send(server)
+                                }
+                                if (done % 8 == 0) {
+                                    emitProgress(
+                                        FetchingStage.TESTING_PIPELINE,
+                                        "Fetching & testing live",
+                                        "Probed $done · $alive reachable · ${workingCount.get()} verified"
+                                    )
+                                }
+                                continue
+                            }
+
+                            val livePing = measureRealTcpLatencyOrNull(
+                                host = server.host,
+                                port = server.port,
+                                timeoutMs = 850
+                            )
+                            val done = probedCount.incrementAndGet()
+                            if (livePing != null) {
+                                val alive = reachableCount.incrementAndGet()
+                                val qIdx = xrayQueuedCount.incrementAndGet()
+                                if (qIdx <= 160 && workingCount.get() < 90) {
+                                    xrayChannel.send(server.copy(pingMs = livePing))
+                                }
+                                if (done % 10 == 0) {
+                                    emitProgress(
+                                        FetchingStage.TESTING_PIPELINE,
+                                        "Fetching & testing live",
+                                        "Probed $done · $alive reachable · ${workingCount.get()} verified"
+                                    )
+                                }
+                            } else if (done % 15 == 0) {
+                                emitProgress(
+                                    FetchingStage.TESTING_PIPELINE,
+                                    "Fetching & testing live",
+                                    "Probed $done · ${reachableCount.get()} reachable · ${workingCount.get()} verified"
+                                )
+                            }
+                        }
+                    }
+                }
+                tcpWorkers.forEach { it.join() }
+            } finally {
+                xrayChannel.close()
+            }
+        }
+
+        // Consumer Pool 2: 24 parallel Xray handshake workers run simultaneously with download & TCP probing
+        val now = System.currentTimeMillis()
+        val xrayWorkersJob = launch(Dispatchers.IO) {
+            val xrayWorkers = List(24) {
+                launch(Dispatchers.IO) {
+                    for (server in xrayChannel) {
+                        if (workingCount.get() >= 90) {
+                            testedCount.incrementAndGet()
+                            continue
+                        }
+
+                        if (context == null) {
+                            testedCount.incrementAndGet()
+                            if (server.pingMs > 0) {
+                                workingServers.add(server.copy(lastAliveAt = now, failCount = 0))
+                                workingCount.incrementAndGet()
+                                updateDiscoveredCountry(
+                                    server.countryCode.takeIf { it != "XX" } ?: detectExplicitCountryCode(server.sni.ifBlank { server.host }),
+                                    server.countryName
+                                )
+                            }
+                            continue
+                        }
+
+                        if (nativeMissing.get()) {
+                            testedCount.incrementAndGet()
+                            if (server.pingMs > 0) {
+                                workingServers.add(server.copy(lastAliveAt = now))
+                                workingCount.incrementAndGet()
+                            }
+                            continue
+                        }
+
+                        val result = measureRealXrayDelayOrNull(
+                            context = context,
+                            server = server,
+                            settings = settings,
+                            tryBackupOnFailure = false
+                        )
+                        val tested = testedCount.incrementAndGet()
+                        when (result) {
+                            is XrayProbeResult.Success -> {
+                                val working = workingCount.incrementAndGet()
+                                val verifiedEntity = server.copy(
+                                    pingMs = result.delayMs,
+                                    lastAliveAt = now,
+                                    failCount = 0
+                                )
+                                workingServers.add(verifiedEntity)
+
+                                // Track fastest ping live
+                                while (true) {
+                                    val curFast = fastestPing.get()
+                                    if (curFast != 0 && curFast <= result.delayMs) break
+                                    if (fastestPing.compareAndSet(curFast, result.delayMs)) break
+                                }
+
+                                val hintCode = server.countryCode.takeIf { it.length == 2 && it != "XX" }
+                                    ?: detectExplicitCountryCode("${server.countryName} ${server.sni} ${server.host}")
+                                updateDiscoveredCountry(hintCode, server.countryName)
+
+                                emitProgress(
+                                    stage = FetchingStage.TESTING_PIPELINE,
+                                    headline = if (fetchDone.get()) "Verifying Xray handshakes" else "Fetching & testing simultaneously",
+                                    detail = "Verified $working working ($tested tested) · Fastest ${fastestPing.get()} ms"
+                                )
+                            }
+
+                            XrayProbeResult.NativeUnavailable -> {
+                                nativeMissing.set(true)
+                                if (server.pingMs > 0) {
+                                    workingServers.add(server.copy(lastAliveAt = now))
+                                    workingCount.incrementAndGet()
+                                }
+                            }
+
+                            XrayProbeResult.Unreachable -> {
+                                if (tested % 8 == 0) {
+                                    emitProgress(
+                                        stage = FetchingStage.TESTING_PIPELINE,
+                                        headline = if (fetchDone.get()) "Verifying Xray handshakes" else "Fetching & testing simultaneously",
+                                        detail = "Tested $tested nodes · ${workingCount.get()} working"
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            xrayWorkers.forEach { it.join() }
+        }
+
+        producerJob.join()
+        tcpWorkersJob.join()
+        xrayWorkersJob.join()
+
+        if (parsedCount.get() == 0) {
+            return@coroutineScope Result.failure(
+                lastFetchError ?: IllegalArgumentException("No valid server nodes found at this URL.")
+            )
+        }
+
+        val verifiedCandidates = workingServers
+            .toList()
+            .distinctBy { "${it.protocolCore.lowercase()}:${it.host.lowercase()}:${it.port}:${it.uuidOrPassword}:${it.sni.lowercase()}" }
+            .sortedWith(
+                compareBy<ServerEntity> { if (it.pingMs > 0) it.pingMs else Int.MAX_VALUE }
+                    .thenBy { it.protocolTier }
+            )
+            .take(120)
+
+        if (verifiedCandidates.isEmpty()) {
+            return@coroutineScope Result.failure(
+                IllegalStateException(
+                    "Tested ${queuedCount.get()} nodes from subscription, but none passed proxy connectivity checks."
+                )
+            )
+        }
+
+        emitProgress(
+            stage = FetchingStage.SPEED_AND_GEO,
+            headline = "Checking speed & locations",
+            detail = "Resolving flags & measuring speed for ${verifiedCandidates.size} working servers…",
+            force = true
+        )
+
+        val finalRanked = enrichSpeedAndGeoConcurrently(
+            verified = verifiedCandidates,
+            baselineJob = baselineJob,
+            nativeUnavailable = nativeMissing.get(),
+            context = context,
+            settings = settings,
+            maxPerCountry = 4,
+            now = now
+        )
+
+        finalRanked.forEach { updateDiscoveredCountry(it.countryCode, it.countryName) }
+        emitProgress(
+            stage = FetchingStage.FINALIZING,
+            headline = "All servers ranked",
+            detail = "${finalRanked.size} verified servers across ${discoveredCountries.size.coerceAtLeast(1)} countries",
+            force = true
+        )
+
+        Result.success(finalRanked)
     }
 
     /**
@@ -308,6 +662,10 @@ class V2RayParserAndFletcher {
      * 5. Runs serialized one-at-a-time throughput verification on top candidates so winners are truly fast.
      * 6. Resolves real IPs + HTTPS-only GeoIP country flags, returning a country-diverse Top 15.
      */
+    /**
+     * Benchmarks candidate servers using pipelined TCP -> Xray verification (no awaitAll barrier)
+     * followed by concurrent throughput + GeoIP enrichment.
+     */
     suspend fun benchmarkAndRankTop15(
         servers: List<ServerEntity>,
         context: Context? = null,
@@ -323,159 +681,210 @@ class V2RayParserAndFletcher {
             servers
         }
 
-        val (udpNodes, tcpNodes) = securityFiltered.partition {
-            it.protocolCore.contains("Hysteria", ignoreCase = true) ||
-                it.protocolCore.contains("WireGuard", ignoreCase = true)
-        }
+        val prioritizedInput = ProtocolRanker.prioritizeCandidates(
+            securityFiltered.distinctBy {
+                "${it.protocolCore.lowercase()}:${it.host.lowercase()}:${it.port}:${it.uuidOrPassword}:${it.sni.lowercase()}"
+            }
+        )
 
         val baselineJob = if (context != null) {
             async { ThroughputProbe.measureOrLoadBaselineMbps(context) }
         } else null
 
-        val semaphore = Semaphore(40)
+        val rawChannel = Channel<ServerEntity>(capacity = 256)
+        val xrayChannel = Channel<ServerEntity>(capacity = 256)
         val completedCounter = AtomicInteger(0)
         val liveCounter = AtomicInteger(0)
-        val totalTcp = tcpNodes.size
+        val xrayQueued = AtomicInteger(0)
+        val xrayDone = AtomicInteger(0)
+        val xrayOk = AtomicInteger(0)
+        val nativeMissing = AtomicBoolean(false)
+        val working = ConcurrentLinkedQueue<ServerEntity>()
+        val now = System.currentTimeMillis()
+        val totalInput = prioritizedInput.size
 
-        // TCP reachability DROPS dead nodes only — never sorts by TCP RTT.
-        val tcpSurvivors = coroutineScope {
-            tcpNodes.map { server ->
-                async {
-                    semaphore.withPermit {
-                        val livePing = measureRealTcpLatencyOrNull(
-                            host = server.host,
-                            port = server.port,
-                            timeoutMs = 1100
-                        )
-                        val done = completedCounter.incrementAndGet()
-                        if (livePing != null) {
-                            val alive = liveCounter.incrementAndGet()
-                            if (done % 10 == 0 || done == totalTcp) {
-                                onProgress("Probed $done/$totalTcp · $alive reachable…")
+        launch {
+            for (item in prioritizedInput) rawChannel.send(item)
+            rawChannel.close()
+        }
+
+        val tcpJob = launch {
+            try {
+                val workers = List(48.coerceAtMost(totalInput.coerceAtLeast(1))) {
+                    launch {
+                        for (server in rawChannel) {
+                            val isUdp = server.protocolCore.contains("Hysteria", ignoreCase = true) ||
+                                server.protocolCore.contains("WireGuard", ignoreCase = true)
+                            if (isUdp) {
+                                completedCounter.incrementAndGet()
+                                liveCounter.incrementAndGet()
+                                if (xrayQueued.incrementAndGet() <= 150 && xrayOk.get() < 85) {
+                                    xrayChannel.send(server)
+                                }
+                                continue
                             }
-                            server.copy(pingMs = livePing)
-                        } else {
-                            if (done % 10 == 0 || done == totalTcp) {
-                                onProgress("Probed $done/$totalTcp · ${liveCounter.get()} reachable…")
+                            val livePing = measureRealTcpLatencyOrNull(
+                                host = server.host,
+                                port = server.port,
+                                timeoutMs = 850
+                            )
+                            val done = completedCounter.incrementAndGet()
+                            if (livePing != null) {
+                                val alive = liveCounter.incrementAndGet()
+                                if (done % 10 == 0 || done == totalInput) {
+                                    onProgress("Probed $done/$totalInput · $alive reachable…")
+                                }
+                                if (xrayQueued.incrementAndGet() <= 150 && xrayOk.get() < 85) {
+                                    xrayChannel.send(server.copy(pingMs = livePing))
+                                }
+                            } else if (done % 10 == 0 || done == totalInput) {
+                                onProgress("Probed $done/$totalInput · ${liveCounter.get()} reachable…")
                             }
-                            null
                         }
                     }
                 }
-            }.awaitAll()
-        }.filterNotNull()
-
-        val baselineMbps = baselineJob?.await() ?: 0.0
-
-        val prioritizedPool = ProtocolRanker.prioritizeCandidates(
-            (tcpSurvivors + udpNodes).distinctBy {
-                "${it.protocolCore.lowercase()}:${it.host.lowercase()}:${it.port}:${it.uuidOrPassword}:${it.sni.lowercase()}"
+                workers.forEach { it.join() }
+            } finally {
+                xrayChannel.close()
             }
-        ).take(140)
+        }
 
-        if (prioritizedPool.isEmpty()) return@withContext emptyList()
-
-        val now = System.currentTimeMillis()
-        val verifiedPool = if (context != null) {
-            onProgress("Verifying Xray handshake for ${prioritizedPool.size} candidates…")
-            val xraySem = Semaphore(16)
-            val xrayDone = AtomicInteger(0)
-            val xrayOk = AtomicInteger(0)
-            val nativeMissing = AtomicBoolean(false)
-
-            val verified = coroutineScope {
-                prioritizedPool.map { server ->
-                    async {
-                        xraySem.withPermit {
-                            if (nativeMissing.get()) {
-                                return@withPermit if (server.pingMs > 0) server else null
+        val xrayJob = launch {
+            val workers = List(24.coerceAtMost(totalInput.coerceAtLeast(1))) {
+                launch {
+                    for (server in xrayChannel) {
+                        if (xrayOk.get() >= 85) {
+                            xrayDone.incrementAndGet()
+                            continue
+                        }
+                        if (context == null || nativeMissing.get()) {
+                            xrayDone.incrementAndGet()
+                            if (server.pingMs > 0) {
+                                working.add(server.copy(lastAliveAt = now, failCount = 0))
+                                xrayOk.incrementAndGet()
                             }
-                            val result = measureRealXrayDelayOrNull(context, server, settings)
-                            val done = xrayDone.incrementAndGet()
-                            when (result) {
-                                is XrayProbeResult.Success -> {
-                                    val ok = xrayOk.incrementAndGet()
-                                    if (done % 8 == 0 || done == prioritizedPool.size) {
-                                        onProgress("Verified $done/${prioritizedPool.size} · $ok working…")
-                                    }
-                                    server.copy(pingMs = result.delayMs, lastAliveAt = now, failCount = 0)
+                            continue
+                        }
+                        val result = measureRealXrayDelayOrNull(
+                            context = context,
+                            server = server,
+                            settings = settings,
+                            tryBackupOnFailure = false
+                        )
+                        val done = xrayDone.incrementAndGet()
+                        when (result) {
+                            is XrayProbeResult.Success -> {
+                                val ok = xrayOk.incrementAndGet()
+                                if (done % 6 == 0) {
+                                    onProgress("Verified $ok working ($done tested)…")
                                 }
-                                XrayProbeResult.NativeUnavailable -> {
-                                    nativeMissing.set(true)
-                                    if (server.pingMs > 0) server.copy(lastAliveAt = now) else null
+                                working.add(server.copy(pingMs = result.delayMs, lastAliveAt = now, failCount = 0))
+                            }
+                            XrayProbeResult.NativeUnavailable -> {
+                                nativeMissing.set(true)
+                                if (server.pingMs > 0) {
+                                    working.add(server.copy(lastAliveAt = now))
+                                    xrayOk.incrementAndGet()
                                 }
-                                XrayProbeResult.Unreachable -> {
-                                    if (done % 8 == 0 || done == prioritizedPool.size) {
-                                        onProgress("Verified $done/${prioritizedPool.size} · ${xrayOk.get()} working…")
-                                    }
-                                    null
+                            }
+                            XrayProbeResult.Unreachable -> {
+                                if (done % 10 == 0) {
+                                    onProgress("Verified ${xrayOk.get()} working ($done tested)…")
                                 }
                             }
                         }
                     }
-                }.awaitAll()
-            }.filterNotNull().sortedWith(
+                }
+            }
+            workers.forEach { it.join() }
+        }
+
+        tcpJob.join()
+        xrayJob.join()
+
+        val verifiedList = working.toList()
+            .sortedWith(
                 compareBy<ServerEntity> { if (it.pingMs > 0) it.pingMs else Int.MAX_VALUE }
                     .thenBy { it.protocolTier }
-            ).take(120)
+            )
+            .take(120)
 
-            if (verified.isNotEmpty() && !nativeMissing.get()) {
-                val speedTargetCount = verified.size.coerceAtMost(5)
-                onProgress("Measuring throughput (1 at a time) for top $speedTargetCount…")
-                val measured = mutableListOf<ServerEntity>()
+        if (verifiedList.isEmpty()) return@withContext emptyList()
+
+        onProgress("Resolving Country Flags & Speed for ${verifiedList.size} servers…")
+        enrichSpeedAndGeoConcurrently(
+            verified = verifiedList,
+            baselineJob = baselineJob,
+            nativeUnavailable = nativeMissing.get(),
+            context = context,
+            settings = settings,
+            maxPerCountry = maxPerCountry,
+            now = now
+        )
+    }
+
+    private suspend fun enrichSpeedAndGeoConcurrently(
+        verified: List<ServerEntity>,
+        baselineJob: kotlinx.coroutines.Deferred<Double>?,
+        nativeUnavailable: Boolean,
+        context: Context?,
+        settings: AppSettingsState,
+        maxPerCountry: Int,
+        now: Long
+    ): List<ServerEntity> = coroutineScope {
+        val dnsSem = Semaphore(32)
+        val geoTask = async(Dispatchers.IO) {
+            val withResolvedIps = verified.map { server ->
+                async(Dispatchers.IO) {
+                    dnsSem.withPermit {
+                        val lookupHost = resolveServerIpAddress(server.host)
+                        server.copy(resolvedIp = lookupHost)
+                    }
+                }
+            }.awaitAll()
+
+            val ipList = withResolvedIps.map { it.resolvedIp }.distinct()
+            val batchGeoMap = fetchBatchGeoIpMap(ipList)
+            withResolvedIps to batchGeoMap
+        }
+
+        val speedTask = async(Dispatchers.IO) {
+            val speedMap = mutableMapOf<String, Double>()
+            if (context != null && verified.isNotEmpty() && !nativeUnavailable) {
+                val baselineMbps = baselineJob?.await() ?: 0.0
                 val acceptTargetMbps = if (baselineMbps > 0.0) {
                     baselineMbps * ThroughputProbe.ACCEPT_BASELINE_FRACTION
                 } else {
                     0.0
                 }
-                for ((idx, candidate) in verified.take(speedTargetCount).withIndex()) {
-                    onProgress("Speed testing ${idx + 1}/$speedTargetCount (${candidate.countryName})…")
+                val speedTargetCount = verified.size.coerceAtMost(3)
+                var fastFound = 0
+                for (candidate in verified.take(speedTargetCount)) {
                     val speed = ThroughputProbe.measureServerThroughputMbps(
                         context = context,
                         server = candidate,
                         parser = this@V2RayParserAndFletcher,
                         settings = settings
                     )
-                    val updated = candidate.copy(lastSpeedMbps = speed, lastAliveAt = now)
-                    measured += updated
-                    if (acceptTargetMbps > 0.0 && speed >= acceptTargetMbps && measured.size >= 3) {
-                        break
+                    val key = "${candidate.host}:${candidate.port}:${candidate.uuidOrPassword}"
+                    speedMap[key] = speed
+                    if (acceptTargetMbps > 0.0 && speed >= acceptTargetMbps) {
+                        fastFound++
+                        if (fastFound >= 2) break
                     }
                 }
-                val measuredIds = measured.map { "${it.host}:${it.port}:${it.uuidOrPassword}" }.toSet()
-                val rest = verified.filterNot { "${it.host}:${it.port}:${it.uuidOrPassword}" in measuredIds }
-                (measured + rest).sortedWith(
-                    compareByDescending<ServerEntity> { it.lastSpeedMbps }
-                        .thenBy { it.protocolTier }
-                        .thenBy { it.pingMs }
-                )
-            } else {
-                verified
             }
-        } else {
-            prioritizedPool.take(120)
+            speedMap
         }
 
-        if (verifiedPool.isEmpty()) return@withContext emptyList()
-
-        onProgress("Resolving Country Flags & IPs for ${verifiedPool.size} servers…")
-
-        val withResolvedIps = coroutineScope {
-            verifiedPool.map { server ->
-                async {
-                    val lookupHost = resolveServerIpAddress(server.host)
-                    server.copy(resolvedIp = lookupHost)
-                }
-            }.awaitAll()
-        }
-
-        val ipList = withResolvedIps.map { it.resolvedIp }.distinct()
-        val batchGeoMap = fetchBatchGeoIpMap(ipList)
+        val (withResolvedIps, batchGeoMap) = geoTask.await()
+        val speedMap = speedTask.await()
 
         val enrichedCandidates = withResolvedIps.map { server ->
+            val key = "${server.host}:${server.port}:${server.uuidOrPassword}"
+            val measuredSpeed = speedMap[key] ?: server.lastSpeedMbps
             val explicitCode = server.countryCode.takeIf { it.length == 2 && it != "XX" }
             val geoResult = batchGeoMap[server.resolvedIp]
-                ?: lookupSingleGeoCountryForIp(server.resolvedIp)
 
             val finalCode = geoResult?.second
                 ?: explicitCode
@@ -487,6 +896,8 @@ class V2RayParserAndFletcher {
             server.copy(
                 countryName = finalName,
                 countryCode = finalCode,
+                lastSpeedMbps = measuredSpeed,
+                lastAliveAt = now,
                 protocolDisplay = "V2Ray · ${server.transport} · ${server.resolvedIp}"
             )
         }
@@ -754,13 +1165,16 @@ class V2RayParserAndFletcher {
      * avoiding cleartext HTTP GeoIP calls.
      */
     private suspend fun fetchBatchGeoIpMap(ips: List<String>): Map<String, Pair<String, String>> = coroutineScope {
-        val validIps = ips.filter { it.isNotBlank() && it.contains(".") }.distinct().take(100)
+        val validIps = ips.filter { it.isNotBlank() && it.contains(".") }.distinct().take(120)
         if (validIps.isEmpty()) return@coroutineScope emptyMap()
-        val sem = Semaphore(8)
+        val sem = Semaphore(20)
         validIps.map { ip ->
             async(Dispatchers.IO) {
+                geoIpCache[ip]?.let { return@async ip to it }
                 sem.withPermit {
-                    lookupSingleGeoCountryForIp(ip)?.let { ip to it }
+                    lookupSingleGeoCountryForIp(ip)?.also { resolved ->
+                        geoIpCache[ip] = resolved
+                    }?.let { ip to it }
                 }
             }
         }.awaitAll().filterNotNull().toMap()
@@ -877,7 +1291,8 @@ class V2RayParserAndFletcher {
     suspend fun measureRealXrayDelayOrNull(
         context: Context,
         server: ServerEntity,
-        settings: AppSettingsState = AppSettingsState()
+        settings: AppSettingsState = AppSettingsState(),
+        tryBackupOnFailure: Boolean = true
     ): XrayProbeResult = withContext(Dispatchers.IO) {
         try {
             ensureCoreEnvInitialized(context)
@@ -894,6 +1309,9 @@ class V2RayParserAndFletcher {
             }
             if (primaryDelay > 0L) {
                 return@withContext XrayProbeResult.Success(primaryDelay.coerceAtMost(Int.MAX_VALUE.toLong()).toInt())
+            }
+            if (!tryBackupOnFailure) {
+                return@withContext XrayProbeResult.Unreachable
             }
             val backupDelay = try {
                 Libv2ray.measureOutboundDelay(testConfig, DELAY_PROBE_BACKUP)
@@ -936,10 +1354,15 @@ class V2RayParserAndFletcher {
 
     suspend fun resolveServerIpAddress(host: String): String = withContext(Dispatchers.IO) {
         val trimmed = host.trim()
+        resolvedIpCache[trimmed]?.let { return@withContext it }
         try {
             val addresses = InetAddress.getAllByName(trimmed)
             val ipv4 = addresses.firstOrNull { it.hostAddress?.contains(".") == true }?.hostAddress
-            ipv4 ?: addresses.firstOrNull()?.hostAddress ?: trimmed
+            val resolved = ipv4 ?: addresses.firstOrNull()?.hostAddress ?: trimmed
+            if (resolved.isNotBlank()) {
+                resolvedIpCache[trimmed] = resolved
+            }
+            resolved
         } catch (_: Exception) {
             trimmed
         }
