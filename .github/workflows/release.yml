@@ -1,12 +1,6 @@
 name: Build and Release APKs
 
 on:
-  push:
-    branches:
-      - main
-      - master
-    tags:
-      - "v*"
   workflow_dispatch:
     inputs:
       tag:
@@ -30,7 +24,6 @@ jobs:
   release:
     name: Build and publish Hollow VPN APKs
     runs-on: ubuntu-latest
-    if: github.event_name != 'push' || !contains(github.event.head_commit.message, '[skip ci]')
 
     steps:
       - name: Check out repository
