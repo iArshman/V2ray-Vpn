@@ -1,0 +1,171 @@
+name: Build and Release APKs
+
+on:
+  push:
+    branches:
+      - main
+      - master
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Optional release tag, for example v1.0.3"
+        required: false
+        type: string
+      prerelease:
+        description: "Mark the GitHub Release as a pre-release"
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    name: Build and publish Hollow VPN APKs
+    runs-on: ubuntu-latest
+    if: github.event_name != 'push' || !contains(github.event.head_commit.message, '[skip ci]')
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Accept Android SDK licenses
+        run: |
+          SDK_ROOT="${ANDROID_HOME:-$ANDROID_SDK_ROOT}"
+          if [ -n "$SDK_ROOT" ] && [ -x "$SDK_ROOT/cmdline-tools/latest/bin/sdkmanager" ]; then
+            yes | "$SDK_ROOT/cmdline-tools/latest/bin/sdkmanager" --licenses >/dev/null || true
+          fi
+
+      - name: Select the next build number
+        id: version
+        shell: bash
+        run: |
+          git fetch --tags --force >/dev/null 2>&1 || true
+          CURRENT_BUILD=$(tr -d '[:space:]' < build_number.properties 2>/dev/null || echo 0)
+          CURRENT_BUILD=${CURRENT_BUILD:-0}
+          MAX_TAG_BUILD=$(git tag -l 'v1.0.*' \
+            | sed -E 's/^v1\.0\.([0-9]+).*/\1/' \
+            | awk '/^[0-9]+$/ { if ($1 > max) max = $1 } END { print max + 0 }')
+          BASE_BUILD=$(( CURRENT_BUILD > MAX_TAG_BUILD ? CURRENT_BUILD : MAX_TAG_BUILD ))
+          printf '%s\n' "$BASE_BUILD" > build_number.properties
+          echo "base_build=$BASE_BUILD" >> "$GITHUB_OUTPUT"
+
+      - name: Prepare signing keystore
+        id: signing
+        env:
+          KEYSTORE_B64: ${{ secrets.RELEASE_KEYSTORE_BASE64 || secrets.KEYSTORE_BASE64 }}
+          STORE_PASS: ${{ secrets.RELEASE_STORE_PASSWORD || secrets.STORE_PASSWORD }}
+          KEY_ALIAS_VAL: ${{ secrets.RELEASE_KEY_ALIAS || secrets.KEY_ALIAS || 'upload' }}
+          KEY_PASS: ${{ secrets.RELEASE_KEY_PASSWORD || secrets.KEY_PASSWORD }}
+        shell: bash
+        run: |
+          if [ -n "$KEYSTORE_B64" ] && [ -n "$STORE_PASS" ] && [ -n "$KEY_PASS" ]; then
+            printf '%s' "$KEYSTORE_B64" | tr -d '\r\n ' | base64 --decode > release.keystore
+            {
+              echo "KEYSTORE_PATH=$GITHUB_WORKSPACE/release.keystore"
+              echo "STORE_PASSWORD=$STORE_PASS"
+              echo "KEY_ALIAS=$KEY_ALIAS_VAL"
+              echo "KEY_PASSWORD=$KEY_PASS"
+              echo "RELEASE_SIGNING=true"
+            } >> "$GITHUB_ENV"
+            echo "Using the configured release keystore."
+          else
+            echo "No release keystore secrets configured; using a temporary debug keystore."
+            keytool -genkeypair -noprompt -v \
+              -keystore debug.keystore \
+              -storepass android \
+              -alias androiddebugkey \
+              -keypass android \
+              -keyalg RSA \
+              -keysize 2048 \
+              -validity 10000 \
+              -dname "CN=Android Debug,O=Android,C=US"
+            echo "RELEASE_SIGNING=false" >> "$GITHUB_ENV"
+          fi
+
+      - name: Build release APKs
+        run: |
+          chmod +x ./gradlew
+          ./gradlew :app:assembleRelease --no-daemon --stacktrace
+
+      - name: Prepare release assets
+        id: assets
+        shell: bash
+        run: |
+          BUILD_NUM=$(tr -d '[:space:]' < build_number.properties)
+          RELEASE_TAG=""
+          if [[ "$GITHUB_REF" == refs/tags/* ]]; then
+            RELEASE_TAG="$GITHUB_REF_NAME"
+          elif [ -n "${{ inputs.tag }}" ]; then
+            RELEASE_TAG="${{ inputs.tag }}"
+          else
+            RELEASE_TAG="v1.0.${BUILD_NUM}"
+          fi
+
+          mkdir -p release-assets
+          shopt -s nullglob
+          APKS=(app/build/outputs/apk/release/*.apk)
+          if [ ${#APKS[@]} -eq 0 ]; then
+            echo "::error::No release APKs were produced."
+            exit 1
+          fi
+
+          for apk in "${APKS[@]}"; do
+            base=$(basename "$apk")
+            case "$base" in
+              *arm64-v8a*) suffix="arm64-v8a" ;;
+              *armeabi-v7a*) suffix="armeabi-v7a" ;;
+              *universal*) suffix="universal" ;;
+              *) suffix="${base%.apk}" ;;
+            esac
+            cp "$apk" "release-assets/HollowVPN-${RELEASE_TAG}-${suffix}.apk"
+          done
+
+          (cd release-assets && sha256sum *.apk > SHA256SUMS.txt)
+          echo "release_tag=$RELEASE_TAG" >> "$GITHUB_OUTPUT"
+          echo "version_name=1.0.$BUILD_NUM" >> "$GITHUB_OUTPUT"
+          ls -lh release-assets
+
+      - name: Upload APKs as workflow artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: hollow-vpn-${{ steps.assets.outputs.release_tag }}-apks
+          path: release-assets/*
+          if-no-files-found: error
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.assets.outputs.release_tag }}
+          name: Hollow VPN ${{ steps.assets.outputs.release_tag }}
+          generate_release_notes: true
+          prerelease: ${{ inputs.prerelease == true }}
+          body: |
+            Automated Hollow VPN release `${{ steps.assets.outputs.version_name }}`.
+
+            Download the APK matching your device architecture. `SHA256SUMS.txt` contains the SHA-256 checksums for verification.
+          files: |
+            release-assets/*.apk
+            release-assets/SHA256SUMS.txt
+
+      - name: Remove temporary signing files
+        if: always()
+        run: rm -f release.keystore debug.keystore

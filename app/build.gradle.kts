@@ -14,6 +14,17 @@ val isReleaseOrBundleTask = gradle.startParameter.taskNames.any {
   it.contains("Release", ignoreCase = true) || it.contains("bundle", ignoreCase = true)
 }
 
+val buildNumberFile = rootProject.file("build_number.properties")
+val currentBuildNumber = buildNumberFile.takeIf { it.isFile }
+  ?.readText()
+  ?.trim()
+  ?.toIntOrNull()
+  ?: 0
+val buildNumber = currentBuildNumber + if (isReleaseOrBundleTask) 1 else 0
+if (isReleaseOrBundleTask) {
+  buildNumberFile.writeText(buildNumber.toString())
+}
+
 android {
   namespace = "com.hollow.vpn"
   compileSdk { version = release(36) { minorApiLevel = 1 } }
@@ -29,8 +40,8 @@ android {
         abiFilters += listOf("armeabi-v7a", "arm64-v8a")
       }
     }
-    versionCode = 1
-    versionName = "1.0"
+    versionCode = buildNumber.coerceAtLeast(1)
+    versionName = "1.0.$buildNumber"
 
     testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
   }
@@ -45,18 +56,23 @@ android {
   }
 
   signingConfigs {
-    create("release") {
-      val keystorePath = System.getenv("KEYSTORE_PATH") ?: "${rootDir}/my-upload-key.jks"
-      storeFile = file(keystorePath)
-      storePassword = System.getenv("STORE_PASSWORD")
-      keyAlias = "upload"
-      keyPassword = System.getenv("KEY_PASSWORD")
-    }
     create("debugConfig") {
       storeFile = file("${rootDir}/debug.keystore")
       storePassword = "android"
       keyAlias = "androiddebugkey"
       keyPassword = "android"
+    }
+    val keystorePath = System.getenv("KEYSTORE_PATH")
+    val storePasswordValue = System.getenv("STORE_PASSWORD")
+    val keyAliasValue = System.getenv("KEY_ALIAS") ?: "upload"
+    val keyPasswordValue = System.getenv("KEY_PASSWORD")
+    if (!keystorePath.isNullOrBlank() && !storePasswordValue.isNullOrBlank() && !keyPasswordValue.isNullOrBlank()) {
+      create("release") {
+        storeFile = file(keystorePath)
+        storePassword = storePasswordValue
+        keyAlias = keyAliasValue
+        keyPassword = keyPasswordValue
+      }
     }
   }
 
@@ -66,7 +82,7 @@ android {
       isMinifyEnabled = true
       isShrinkResources = true
       proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
-      signingConfig = signingConfigs.getByName("release")
+      signingConfig = signingConfigs.findByName("release") ?: signingConfigs.getByName("debugConfig")
     }
     debug {
       signingConfig = signingConfigs.getByName("debugConfig")
