@@ -75,6 +75,7 @@ import com.hollow.vpn.data.ServerEntity
 import com.hollow.vpn.data.ServerFilter
 import com.hollow.vpn.ui.components.HollowTopSquareButton
 import com.hollow.vpn.ui.components.HollowUnderlinedTabRow
+import com.hollow.vpn.ui.components.countryCodeToFlagEmoji
 import com.hollow.vpn.ui.theme.HollowCream
 import com.hollow.vpn.ui.theme.HollowCreamDivider
 import com.hollow.vpn.ui.theme.HollowCreamSurface
@@ -89,7 +90,7 @@ import com.hollow.vpn.ui.theme.SpaceGroteskFamily
 @Composable
 fun CountryServerListScreen(
     servers: List<ServerEntity>,
-    selectedFilter: ServerFilter = ServerFilter.ALL,
+    selectedFilter: ServerFilter = ServerFilter.FASTEST,
     activeProtocolPreference: String = "Auto (V2Ray)",
     bottomContentPadding: Dp = 0.dp,
     onSelectFilter: (ServerFilter) -> Unit = {},
@@ -149,10 +150,14 @@ fun CountryServerListScreen(
         }
     }
 
+    val topFastestServers = remember(displayedServers) {
+        displayedServers.take(6)
+    }
+
     val tabs = remember {
         listOf(
+            ServerFilter.FASTEST to "Fastest",
             ServerFilter.ALL to "All",
-            ServerFilter.RECOMMENDED to "Recommended",
             ServerFilter.LOW_PING to "Low ping"
         )
     }
@@ -253,8 +258,8 @@ fun CountryServerListScreen(
                             onDismissRequest = { overflowMenuExpanded = false },
                             offset = DpOffset(x = 0.dp, y = 8.dp),
                             containerColor = HollowInk,
-                            shape = RoundedCornerShape(22.dp),
-                            modifier = Modifier.width(248.dp)
+                            shape = RoundedCornerShape(18.dp),
+                            modifier = Modifier.width(212.dp)
                         ) {
                             ServerOverflowMenuItem(
                                 icon = Icons.Outlined.Schedule,
@@ -428,8 +433,10 @@ fun CountryServerListScreen(
                     .testTag("server_lazy_column"),
                 contentPadding = PaddingValues(bottom = 24.dp)
             ) {
-                // Dark FASTEST Card (Page 4)
-                if (fastestNode != null) {
+                val isFastestTab = selectedFilter == ServerFilter.FASTEST
+
+                // Dark FASTEST Hero Card (shown ONLY on the Fastest tab)
+                if (isFastestTab && fastestNode != null) {
                     item(key = "fastest_hero_card") {
                         Surface(
                             modifier = Modifier
@@ -457,15 +464,24 @@ fun CountryServerListScreen(
                                         color = HollowOrange
                                     )
                                     Spacer(modifier = Modifier.height(6.dp))
-                                    Text(
-                                        text = fastestNode.countryName.ifBlank { "Fastest Node" },
-                                        fontFamily = SpaceGroteskFamily,
-                                        fontWeight = FontWeight.Bold,
-                                        fontSize = 21.sp,
-                                        color = HollowCream,
-                                        maxLines = 1,
-                                        overflow = TextOverflow.Ellipsis
-                                    )
+                                    Row(
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                                    ) {
+                                        Text(
+                                            text = countryCodeToFlagEmoji(fastestNode.countryCode),
+                                            fontSize = 22.sp
+                                        )
+                                        Text(
+                                            text = fastestNode.countryName.ifBlank { "Fastest Node" },
+                                            fontFamily = SpaceGroteskFamily,
+                                            fontWeight = FontWeight.Bold,
+                                            fontSize = 21.sp,
+                                            color = HollowCream,
+                                            maxLines = 1,
+                                            overflow = TextOverflow.Ellipsis
+                                        )
+                                    }
                                     Spacer(modifier = Modifier.height(4.dp))
                                     val addr = fastestNode.resolvedIp.ifBlank { fastestNode.host }
                                     Text(
@@ -501,11 +517,12 @@ fun CountryServerListScreen(
                                 }
                             }
                         }
-                        Spacer(modifier = Modifier.height(8.dp))
+                        Spacer(modifier = Modifier.height(14.dp))
                     }
                 }
 
-                if (orderedGroups.isEmpty()) {
+                val isEmpty = if (isFastestTab) topFastestServers.isEmpty() else orderedGroups.isEmpty()
+                if (isEmpty) {
                     item(key = "empty_state") {
                         Surface(
                             modifier = Modifier
@@ -568,14 +585,81 @@ fun CountryServerListScreen(
                     }
                 }
 
-                // Country Rows matching Page 4
-                orderedGroups.forEachIndexed { groupIndex, (country, countryServers) ->
+                if (isFastestTab && topFastestServers.isNotEmpty()) {
+                    item(key = "fastest_list_header") {
+                        Text(
+                            text = "TOP ${topFastestServers.size} FASTEST",
+                            fontFamily = JetBrainsMonoFamily,
+                            fontWeight = FontWeight.SemiBold,
+                            fontSize = 11.sp,
+                            letterSpacing = 1.4.sp,
+                            color = HollowInkSecondary,
+                            modifier = Modifier.padding(bottom = 8.dp)
+                        )
+                    }
+                    item(key = "fastest_flat_list") {
+                        Column(modifier = Modifier.fillMaxWidth()) {
+                            topFastestServers.forEachIndexed { idx, server ->
+                                val isChecked = server.id in selectedIds
+                                Box(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .clickable {
+                                            if (isSelectionMode) {
+                                                selectedIds = if (isChecked) {
+                                                    selectedIds - server.id
+                                                } else {
+                                                    selectedIds + server.id
+                                                }
+                                            } else {
+                                                onSelectServer(server)
+                                            }
+                                        }
+                                        .testTag("fastest_server_${server.id}")
+                                ) {
+                                    ServerItemRowContent(
+                                        server = server,
+                                        showLightningBadge = idx == 0 || server.isSelected,
+                                        onSelect = { onSelectServer(server) },
+                                        onPing = { onPingServer(server) },
+                                        onInspectJson = { onInspectJson(server) },
+                                        onDelete = { onDeleteServer(server) },
+                                        onCopyFeedback = onShowMessage,
+                                        onShareQr = { onShareQr(server) },
+                                        isSelectionMode = isSelectionMode,
+                                        isCheckedForBatch = isChecked,
+                                        onToggleBatchCheck = {
+                                            selectedIds = if (isChecked) {
+                                                selectedIds - server.id
+                                            } else {
+                                                selectedIds + server.id
+                                            }
+                                        },
+                                        showCountryBadge = true
+                                    )
+                                }
+                                if (idx < topFastestServers.lastIndex) {
+                                    HorizontalDivider(
+                                        thickness = 1.dp,
+                                        color = HollowCreamDivider
+                                    )
+                                }
+                            }
+                        }
+                    }
+                } else if (!isFastestTab) {
+                    // Country Rows (All / Low ping tabs — without top Fastest hero card)
+                    orderedGroups.forEachIndexed { groupIndex, (country, countryServers) ->
                     val orderedServers = countryServers.sortedBy {
                         if (it.pingMs > 0) it.pingMs else Int.MAX_VALUE
                     }
                     val bestPing = orderedServers.firstOrNull { it.pingMs > 0 }?.pingMs ?: 0
                     val hasSelected = orderedServers.any { it.isSelected }
                     val isExpanded = expanded[country] ?: (isSelectionMode || orderedGroups.size == 1)
+
+                    val groupCode = orderedServers.firstOrNull {
+                        it.countryCode.length == 2 && !it.countryCode.equals("XX", ignoreCase = true)
+                    }?.countryCode
 
                     item(key = "country_$country") {
                         Column(modifier = Modifier.fillMaxWidth()) {
@@ -594,6 +678,10 @@ fun CountryServerListScreen(
                                         verticalAlignment = Alignment.CenterVertically,
                                         horizontalArrangement = Arrangement.spacedBy(8.dp)
                                     ) {
+                                        Text(
+                                            text = countryCodeToFlagEmoji(groupCode),
+                                            fontSize = 20.sp
+                                        )
                                         Text(
                                             text = country,
                                             fontFamily = SpaceGroteskFamily,
@@ -755,6 +843,7 @@ fun CountryServerListScreen(
                         }
                     }
                 }
+                }
             }
         }
     }
@@ -813,19 +902,19 @@ private fun ServerOverflowMenuItem(
         text = {
             Row(
                 verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(14.dp),
-                modifier = Modifier.padding(vertical = 4.dp)
+                horizontalArrangement = Arrangement.spacedBy(12.dp),
+                modifier = Modifier.padding(vertical = 2.dp)
             ) {
                 Icon(
                     imageVector = icon,
                     contentDescription = null,
                     tint = color,
-                    modifier = Modifier.size(19.dp)
+                    modifier = Modifier.size(18.dp)
                 )
                 Text(
                     text = label,
-                    style = MaterialTheme.typography.bodyLarge.copy(
-                        fontSize = 15.sp,
+                    style = MaterialTheme.typography.bodyMedium.copy(
+                        fontSize = 14.sp,
                         fontWeight = FontWeight.Medium
                     ),
                     color = color

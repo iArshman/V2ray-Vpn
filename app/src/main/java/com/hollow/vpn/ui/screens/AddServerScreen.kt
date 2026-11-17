@@ -64,6 +64,7 @@ import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -226,7 +227,9 @@ fun AddServerScreen(
                 tabs = tabs.map { it.second },
                 selectedIndex = selectedTabIndex,
                 onSelectTab = { idx -> onSelectTab(tabs[idx].first) },
-                tabTestTags = tabs.map { "tab_${it.first.name.lowercase()}" }
+                tabTestTags = tabs.map { "tab_${it.first.name.lowercase()}" },
+                tabFontSize = 13.5.sp,
+                tabSpacing = 18.dp
             )
 
             Column(
@@ -308,8 +311,10 @@ fun AddServerScreen(
                                 text = "Add & fetch",
                                 style = MaterialTheme.typography.titleMedium.copy(
                                     fontWeight = FontWeight.SemiBold,
-                                    fontSize = 16.sp
-                                )
+                                    fontSize = 14.sp
+                                ),
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
                             )
                         }
 
@@ -342,8 +347,10 @@ fun AddServerScreen(
                                 text = "Paste from clipboard",
                                 style = MaterialTheme.typography.titleMedium.copy(
                                     fontWeight = FontWeight.SemiBold,
-                                    fontSize = 15.5.sp
-                                )
+                                    fontSize = 14.sp
+                                ),
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
                             )
                         }
 
@@ -760,7 +767,12 @@ fun AddServerScreen(
                             ) {
                                 Text(
                                     text = "Save Custom Server & Ping Test",
-                                    style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.SemiBold)
+                                    style = MaterialTheme.typography.titleMedium.copy(
+                                        fontWeight = FontWeight.SemiBold,
+                                        fontSize = 14.sp
+                                    ),
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
                                 )
                             }
                         }
@@ -828,10 +840,16 @@ fun AddServerScreen(
                                         Icon(
                                             imageVector = Icons.Outlined.QrCodeScanner,
                                             contentDescription = null,
-                                            modifier = Modifier.size(18.dp)
+                                            modifier = Modifier.size(16.dp)
                                         )
-                                        Spacer(Modifier.width(6.dp))
-                                        Text("Scan Camera")
+                                        Spacer(Modifier.width(4.dp))
+                                        Text(
+                                            text = "Scan Camera",
+                                            fontSize = 13.sp,
+                                            fontWeight = FontWeight.SemiBold,
+                                            maxLines = 1,
+                                            overflow = TextOverflow.Ellipsis
+                                        )
                                     }
                                     OutlinedButton(
                                         onClick = {
@@ -852,10 +870,16 @@ fun AddServerScreen(
                                         Icon(
                                             imageVector = Icons.Outlined.PhotoLibrary,
                                             contentDescription = null,
-                                            modifier = Modifier.size(18.dp)
+                                            modifier = Modifier.size(16.dp)
                                         )
-                                        Spacer(Modifier.width(6.dp))
-                                        Text("Gallery")
+                                        Spacer(Modifier.width(4.dp))
+                                        Text(
+                                            text = "Gallery",
+                                            fontSize = 13.sp,
+                                            fontWeight = FontWeight.SemiBold,
+                                            maxLines = 1,
+                                            overflow = TextOverflow.Ellipsis
+                                        )
                                     }
                                 }
 
@@ -905,7 +929,12 @@ fun AddServerScreen(
                                 ) {
                                     Text(
                                         text = "Import QR Server & Ping Test",
-                                        style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.SemiBold)
+                                        style = MaterialTheme.typography.titleMedium.copy(
+                                            fontWeight = FontWeight.SemiBold,
+                                            fontSize = 14.sp
+                                        ),
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis
                                     )
                                 }
                             }

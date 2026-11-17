@@ -449,7 +449,6 @@ fun HollowVpnApp(
                                     onClearXrayLogs = vpnViewModel::clearXrayLogs,
                                     onExportServers = exportServersToClipboard,
                                     onShowMessage = vpnViewModel::showMessage,
-                                    onClearCache = vpnViewModel::clearServerCacheAndReset,
                                     onBack = {
                                         if (!vpnViewModel.navigateBack()) {
                                             vpnViewModel.navigateTo(VpnScreen.CONNECTED_HOME)

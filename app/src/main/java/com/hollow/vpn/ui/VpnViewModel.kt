@@ -66,6 +66,7 @@ data class ConnectionTelemetryState(
     val serverIpLabel: String = "—",
     val realPublicIpLabel: String = "Detecting…",
     val realPublicCountryCode: String = "XX",
+    val realIspLabel: String = "Detecting…",
     val preConnectionIp: String = ""
 ) {
     val formattedTimer: String
@@ -123,7 +124,7 @@ class VpnViewModel(application: Application) : AndroidViewModel(application) {
     private val _gettingStartedStep = MutableStateFlow(0)
     val gettingStartedStep: StateFlow<Int> = _gettingStartedStep.asStateFlow()
 
-    private val _selectedFilter = MutableStateFlow(ServerFilter.ALL)
+    private val _selectedFilter = MutableStateFlow(ServerFilter.FASTEST)
     val selectedFilter: StateFlow<ServerFilter> = _selectedFilter.asStateFlow()
 
     private val _telemetry = MutableStateFlow(ConnectionTelemetryState())
@@ -158,6 +159,12 @@ class VpnViewModel(application: Application) : AndroidViewModel(application) {
     ) { servers, filter, settings ->
         val protocolFiltered = filterByProtocolPreference(servers, settings.protocolPreference)
         when (filter) {
+            ServerFilter.FASTEST -> {
+                protocolFiltered.sortedWith(
+                    compareBy<ServerEntity> { if (it.pingMs > 0) it.pingMs else Int.MAX_VALUE }
+                        .thenByDescending { it.lastSpeedMbps }
+                )
+            }
             ServerFilter.ALL -> {
                 protocolFiltered.sortedWith(
                     compareByDescending<ServerEntity> { it.isSelected }
@@ -247,6 +254,7 @@ class VpnViewModel(application: Application) : AndroidViewModel(application) {
                         it.copy(
                             isConnected = true,
                             isConnecting = false,
+                            connectingStage = 1,
                             elapsedSeconds = 0L,
                             uploadBytes = 0L,
                             downloadBytes = 0L,
@@ -265,6 +273,7 @@ class VpnViewModel(application: Application) : AndroidViewModel(application) {
                         it.copy(
                             isConnected = false,
                             isConnecting = false,
+                            connectingStage = 1,
                             uploadBytesPerSec = 0L,
                             downloadBytesPerSec = 0L
                         )
@@ -277,6 +286,15 @@ class VpnViewModel(application: Application) : AndroidViewModel(application) {
                             delay(600L)
                             refreshRealPublicIp()
                         }
+                    }
+                }
+            }
+        }
+        viewModelScope.launch {
+            XrayVpnService.connectStage.collect { stage ->
+                if (stage >= 2 && _telemetry.value.isConnecting) {
+                    _telemetry.update {
+                        it.copy(connectingStage = max(it.connectingStage, stage))
                     }
                 }
             }
@@ -304,6 +322,7 @@ class VpnViewModel(application: Application) : AndroidViewModel(application) {
                             it.copy(
                                 isConnecting = false,
                                 isConnected = false,
+                                connectingStage = 1,
                                 uploadBytesPerSec = 0L,
                                 downloadBytesPerSec = 0L
                             )
@@ -328,16 +347,17 @@ class VpnViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch {
             val wasTunnelActive = _telemetry.value.isConnected || _telemetry.value.isConnecting
             val proxyPort = if (_telemetry.value.isConnected && !_settings.value.tunMode) 10808 else null
-            val (ip, country, code) = fletcher.fetchDevicePublicIpInfo(socksProxyPort = proxyPort)
+            val info = fletcher.fetchDevicePublicIpInfo(socksProxyPort = proxyPort)
             _telemetry.update { prev ->
-                val savedPreIp = if (!wasTunnelActive && ip.isNotBlank() && !ip.equals("Detecting…", ignoreCase = true)) {
-                    ip
+                val savedPreIp = if (!wasTunnelActive && info.ip.isNotBlank() && !info.ip.equals("Detecting…", ignoreCase = true)) {
+                    info.ip
                 } else {
                     prev.preConnectionIp
                 }
                 prev.copy(
-                    realPublicIpLabel = "$ip · $country",
-                    realPublicCountryCode = code,
+                    realPublicIpLabel = "${info.ip} · ${info.country}",
+                    realPublicCountryCode = info.countryCode,
+                    realIspLabel = info.isp,
                     preConnectionIp = savedPreIp
                 )
             }
@@ -608,7 +628,7 @@ class VpnViewModel(application: Application) : AndroidViewModel(application) {
         if (_telemetry.value.isConnecting) {
             connectJob?.cancel()
             connectJob = null
-            _telemetry.update { it.copy(isConnecting = false, isConnected = false) }
+            _telemetry.update { it.copy(isConnecting = false, isConnected = false, connectingStage = 1) }
             stopAndroidVpnService()
             return
         }
@@ -619,7 +639,8 @@ class VpnViewModel(application: Application) : AndroidViewModel(application) {
             _telemetry.update {
                 it.copy(
                     isConnected = false,
-                    isConnecting = false
+                    isConnecting = false,
+                    connectingStage = 1
                 )
             }
             stopAndroidVpnService()
@@ -700,7 +721,7 @@ class VpnViewModel(application: Application) : AndroidViewModel(application) {
         _telemetry.update { prev ->
             prev.copy(
                 serverIpLabel = resolvedIp,
-                connectingStage = 3
+                connectingStage = 2
             )
         }
         startAndroidVpnService(updatedServer)
@@ -782,8 +803,9 @@ class VpnViewModel(application: Application) : AndroidViewModel(application) {
                     } else if (fastest != null) {
                         val ip = fletcher.resolveServerIpAddress(fastest.host)
                         _telemetry.update { it.copy(serverIpLabel = ip) }
+                        val countryCount = withSelected.map { it.countryName }.distinct().size
                         showMessage(
-                            "Ranked Top ${withSelected.size} verified servers · #1 ${fastest.countryName} (${fastest.pingMs} ms)"
+                            "Ranked ${withSelected.size} verified servers across $countryCount countries · #1 ${fastest.countryName} (${fastest.pingMs} ms)"
                         )
                     }
                 },
@@ -826,6 +848,7 @@ class VpnViewModel(application: Application) : AndroidViewModel(application) {
      */
     fun addAndFetchSubscriptionUrl(rawUrlOrLinks: String) {
         val input = rawUrlOrLinks.trim()
+            .replaceFirst(Regex("^https?://(?=https?://)", RegexOption.IGNORE_CASE), "")
         if (input.isBlank()) {
             showMessage("Please enter a valid subscription URL or server link")
             return
@@ -874,8 +897,9 @@ class VpnViewModel(application: Application) : AndroidViewModel(application) {
                         _telemetry.update { it.copy(serverIpLabel = ip) }
                     }
                     _currentScreen.value = VpnScreen.SERVER_LIST
+                    val countryCount = marked.map { it.countryName }.distinct().size
                     showMessage(
-                        "Fetched & ranked Top ${marked.size} verified servers! Fastest: ${fastest?.countryName ?: ""} (${fastest?.pingMs ?: 0} ms)"
+                        "Saved ${marked.size} verified servers across $countryCount countries · Fastest: ${fastest?.countryName ?: ""} (${fastest?.pingMs ?: 0} ms)"
                     )
                 },
                 onFailure = { err ->
@@ -901,14 +925,15 @@ class VpnViewModel(application: Application) : AndroidViewModel(application) {
                 showMessage("No valid supported server link or JSON config found")
                 return@launch
             }
-            showMessage("Verifying latency for ${parsed.size} imported server(s)…")
+            val candidatePool = fletcher.selectDiverseCandidatePool(parsed, maxCandidates = 360)
+            showMessage("Verifying latency for ${candidatePool.size} imported server(s)…")
             val benchmarked = fletcher.benchmarkAndRankTop15(
-                servers = parsed,
+                servers = candidatePool,
                 context = getApplication(),
                 settings = _settings.value
             )
             if (benchmarked.isEmpty()) {
-                showMessage("Parsed ${parsed.size} server(s), but none passed Xray proxy verification")
+                showMessage("Tested ${candidatePool.size} server(s), but none passed Xray proxy verification")
                 return@launch
             }
             dao.clearSelection()

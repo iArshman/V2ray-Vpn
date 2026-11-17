@@ -58,6 +58,7 @@ data class SubscriptionEntity(
 )
 
 enum class ServerFilter(val label: String) {
+    FASTEST("Fastest"),
     ALL("All"),
     RECOMMENDED("Recommended"),
     LOW_PING("Low Ping"),

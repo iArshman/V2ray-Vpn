@@ -161,7 +161,9 @@ class ResilientFetcher(
             } catch (_: Exception) {
             }
         }
-        return chunks.joinToString("\n").takeIf { it.isNotBlank() }
+        val joined = chunks.joinToString("\n").takeIf { it.isNotBlank() } ?: return null
+        // Never return partial Range slices for Base64-encoded subscriptions (missing header/alignment breaks decode)
+        return if (joined.contains("://")) joined else null
     }
 
     internal fun buildRouteCandidates(url: String, mirrorsEnabled: Boolean): List<Pair<String, String>> {
@@ -234,7 +236,7 @@ class ResilientFetcher(
 
     companion object {
         private const val ROUTE_STAGGER_MS = 250L
-        private const val LARGE_FILE_THRESHOLD_BYTES = 3L * 1024L * 1024L
+        private const val LARGE_FILE_THRESHOLD_BYTES = 12L * 1024L * 1024L
         private const val USER_AGENT = "v2rayNG/1.9.0 Xray/25.1.1 HollowVPN/1.0"
     }
 }

@@ -90,6 +90,7 @@ import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.IntOffset
+import androidx.compose.ui.unit.TextUnit
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.hollow.vpn.ui.theme.HollowCream
@@ -224,10 +225,10 @@ fun HollowTopSquareButton(
     Surface(
         modifier = modifier
             .size(44.dp)
-            .clip(RoundedCornerShape(14.dp))
+            .clip(RoundedCornerShape(13.dp))
             .clickable(role = Role.Button, onClick = onClick)
             .semantics { this.contentDescription = contentDescription },
-        shape = RoundedCornerShape(14.dp),
+        shape = RoundedCornerShape(13.dp),
         color = containerColor,
         border = borderColor?.let { BorderStroke(1.dp, it) }
     ) {
@@ -240,8 +241,18 @@ fun HollowTopSquareButton(
     }
 }
 
+fun countryCodeToFlagEmoji(countryCode: String?): String {
+    val clean = countryCode?.trim()?.uppercase().orEmpty()
+    if (clean.length != 2 || clean == "XX" || clean == "VP" || !clean.all { it in 'A'..'Z' }) {
+        return "🌐"
+    }
+    val first = Character.toChars(0x1F1E6 + (clean[0] - 'A'))
+    val second = Character.toChars(0x1F1E6 + (clean[1] - 'A'))
+    return String(first) + String(second)
+}
+
 /**
- * Crisp 8-ray gear/sun icon matching the Hollow redesign top-right & bottom-right Settings icon.
+ * Crisp 8-ray gear/sun icon kept for compatibility if referenced elsewhere.
  */
 @Composable
 fun HollowGearSunIcon(
@@ -306,7 +317,7 @@ fun HollowBottomNavigationBar(
         Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .height(72.dp),
+                .height(66.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
             HollowBottomNavItem(
@@ -324,7 +335,7 @@ fun HollowBottomNavigationBar(
                     imageVector = Icons.Rounded.PowerSettingsNew,
                     contentDescription = "Connect",
                     tint = tint,
-                    modifier = Modifier.size(22.dp)
+                    modifier = Modifier.size(21.dp)
                 )
             }
 
@@ -343,7 +354,7 @@ fun HollowBottomNavigationBar(
                     imageVector = Icons.Outlined.Dns,
                     contentDescription = "Servers",
                     tint = tint,
-                    modifier = Modifier.size(21.dp)
+                    modifier = Modifier.size(20.dp)
                 )
             }
 
@@ -358,9 +369,15 @@ fun HollowBottomNavigationBar(
                     .weight(1f)
                     .testTag("nav_tab_settings")
             ) { tint ->
-                HollowGearSunIcon(
+                Icon(
+                    imageVector = if (selectedTab == HollowBottomTab.SETTINGS) {
+                        Icons.Rounded.Settings
+                    } else {
+                        Icons.Outlined.Settings
+                    },
+                    contentDescription = "Settings",
                     tint = tint,
-                    modifier = Modifier.size(22.dp)
+                    modifier = Modifier.size(21.dp)
                 )
             }
         }
@@ -390,8 +407,8 @@ private fun HollowBottomNavItem(
             Box(
                 modifier = Modifier
                     .align(Alignment.TopCenter)
-                    .width(32.dp)
-                    .height(3.dp)
+                    .width(26.dp)
+                    .height(2.5.dp)
                     .background(activeIndicatorColor)
             )
         }
@@ -400,12 +417,13 @@ private fun HollowBottomNavItem(
             verticalArrangement = Arrangement.Center
         ) {
             icon(contentColor)
-            Spacer(modifier = Modifier.height(4.dp))
+            Spacer(modifier = Modifier.height(3.dp))
             Text(
                 text = label,
-                fontFamily = SpaceGroteskFamily,
-                fontWeight = if (selected) FontWeight.Bold else FontWeight.Medium,
-                fontSize = 13.sp,
+                style = MaterialTheme.typography.labelMedium.copy(
+                    fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Medium,
+                    fontSize = 12.sp
+                ),
                 color = contentColor,
                 maxLines = 1
             )
@@ -435,7 +453,7 @@ fun HollowSlideActionPill(
     val nudgeMotion = rememberInfiniteTransition(label = "slide_nudge")
     val nudgeOffsetDp by nudgeMotion.animateFloat(
         initialValue = 0f,
-        targetValue = 12f,
+        targetValue = 14f,
         animationSpec = infiniteRepeatable(
             animation = tween(durationMillis = 800, easing = FastOutSlowInEasing),
             repeatMode = RepeatMode.Reverse
@@ -457,23 +475,21 @@ fun HollowSlideActionPill(
         }
         val offsetX = remember(label) { Animatable(0f) }
         val progress = (offsetX.value / maxOffsetPx).coerceIn(0f, 1f)
-        val idleNudgePx = if (offsetX.value < 2f) {
-            with(density) { nudgeOffsetDp.dp.toPx() }
-        } else {
-            0f
-        }
+        val nudgePx = with(density) { nudgeOffsetDp.dp.toPx() }
+        val nudgeFactor = (1f - progress * 10f).coerceIn(0f, 1f)
 
         Text(
             text = label,
-            fontFamily = SpaceGroteskFamily,
-            fontWeight = FontWeight.SemiBold,
-            fontSize = 17.sp,
+            style = MaterialTheme.typography.titleMedium.copy(
+                fontWeight = FontWeight.SemiBold,
+                fontSize = 16.sp
+            ),
             color = labelColor,
             maxLines = 1,
             overflow = TextOverflow.Ellipsis,
             modifier = Modifier
                 .align(Alignment.Center)
-                .padding(start = 40.dp)
+                .padding(start = 34.dp)
                 .alpha((1f - progress * 1.45f).coerceIn(0f, 1f))
         )
 
@@ -481,7 +497,7 @@ fun HollowSlideActionPill(
             modifier = Modifier
                 .align(Alignment.CenterStart)
                 .padding(horizontal = trackPadding)
-                .offset { IntOffset((offsetX.value + idleNudgePx).roundToInt(), 0) }
+                .offset { IntOffset((offsetX.value + nudgePx * nudgeFactor).roundToInt(), 0) }
                 .size(thumbSize)
                 .clip(CircleShape)
                 .background(thumbColor)
@@ -525,7 +541,7 @@ fun HollowSlideActionPill(
                 imageVector = Icons.AutoMirrored.Rounded.ArrowForward,
                 contentDescription = null,
                 tint = arrowColor,
-                modifier = Modifier.size(24.dp)
+                modifier = Modifier.size(22.dp)
             )
         }
     }
@@ -1556,12 +1572,14 @@ fun HollowUnderlinedTabRow(
     selectedIndex: Int,
     onSelectTab: (Int) -> Unit,
     modifier: Modifier = Modifier,
-    tabTestTags: List<String> = emptyList()
+    tabTestTags: List<String> = emptyList(),
+    tabFontSize: TextUnit = 15.sp,
+    tabSpacing: Dp = 24.dp
 ) {
     Column(modifier = modifier.fillMaxWidth()) {
         Row(
             modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.spacedBy(24.dp)
+            horizontalArrangement = Arrangement.spacedBy(tabSpacing)
         ) {
             tabs.forEachIndexed { index, title ->
                 val isSelected = index == selectedIndex
@@ -1576,7 +1594,7 @@ fun HollowUnderlinedTabRow(
                     Text(
                         text = title,
                         style = MaterialTheme.typography.titleSmall.copy(
-                            fontSize = 15.sp,
+                            fontSize = tabFontSize,
                             fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Medium
                         ),
                         color = if (isSelected) HollowInk else HollowInkSecondary,
@@ -1598,7 +1616,7 @@ fun HollowUnderlinedTabRow(
 
 /**
  * Editorial exposure & route readiness card for the Disconnected / Unprotected home state.
- * Displays real public origin country, tunnel mode, and dashed route preview to the selected exit node.
+ * Displays detected ISP provider on the left and public country location on the right.
  */
 @Composable
 fun HollowDisconnectedExposureCard(
@@ -1607,6 +1625,7 @@ fun HollowDisconnectedExposureCard(
     targetCountryCode: String?,
     targetCountryName: String?,
     tunModeEnabled: Boolean,
+    ispLabel: String = "Detecting…",
     mapHeight: Dp = 132.dp,
     modifier: Modifier = Modifier
 ) {
@@ -1772,30 +1791,74 @@ fun HollowDisconnectedExposureCard(
 
             HorizontalDivider(thickness = 1.dp, color = HollowCreamDivider)
 
-            Column(
+            Row(
                 modifier = Modifier
                     .fillMaxWidth()
                     .padding(horizontal = 16.dp, vertical = 11.dp),
-                horizontalAlignment = Alignment.CenterHorizontally
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
             ) {
-                Text(
-                    text = "Your Location",
-                    fontFamily = JetBrainsMonoFamily,
-                    fontWeight = FontWeight.Medium,
-                    fontSize = 10.sp,
-                    letterSpacing = 0.8.sp,
-                    color = HollowInkSecondary
+                Column(
+                    modifier = Modifier
+                        .weight(1f)
+                        .padding(end = 10.dp),
+                    horizontalAlignment = Alignment.Start
+                ) {
+                    Text(
+                        text = "ISP PROVIDER",
+                        fontFamily = JetBrainsMonoFamily,
+                        fontWeight = FontWeight.Medium,
+                        fontSize = 10.sp,
+                        letterSpacing = 0.8.sp,
+                        color = HollowInkSecondary,
+                        maxLines = 1
+                    )
+                    Spacer(modifier = Modifier.height(2.dp))
+                    Text(
+                        text = ispLabel.ifBlank { "Detecting…" },
+                        fontFamily = SpaceGroteskFamily,
+                        fontWeight = FontWeight.SemiBold,
+                        fontSize = 13.5.sp,
+                        color = HollowInk,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                }
+
+                Box(
+                    modifier = Modifier
+                        .width(1.dp)
+                        .height(28.dp)
+                        .background(HollowCreamDivider)
                 )
-                Spacer(modifier = Modifier.height(2.dp))
-                Text(
-                    text = originLocationLabel,
-                    fontFamily = SpaceGroteskFamily,
-                    fontWeight = FontWeight.SemiBold,
-                    fontSize = 14.sp,
-                    color = HollowInk,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis
-                )
+
+                Column(
+                    modifier = Modifier
+                        .weight(1f)
+                        .padding(start = 10.dp),
+                    horizontalAlignment = Alignment.End
+                ) {
+                    Text(
+                        text = "YOUR LOCATION",
+                        fontFamily = JetBrainsMonoFamily,
+                        fontWeight = FontWeight.Medium,
+                        fontSize = 10.sp,
+                        letterSpacing = 0.8.sp,
+                        color = HollowInkSecondary,
+                        maxLines = 1
+                    )
+                    Spacer(modifier = Modifier.height(2.dp))
+                    val originFlag = countryCodeToFlagEmoji(originCountryCode)
+                    Text(
+                        text = "$originFlag $originLocationLabel",
+                        fontFamily = SpaceGroteskFamily,
+                        fontWeight = FontWeight.SemiBold,
+                        fontSize = 13.5.sp,
+                        color = HollowInk,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                }
             }
         }
     }

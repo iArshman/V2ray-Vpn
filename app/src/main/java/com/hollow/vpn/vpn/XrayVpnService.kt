@@ -104,6 +104,7 @@ class XrayVpnService : VpnService() {
             appendLog("Disconnect requested by user")
             val gen = commandGeneration.incrementAndGet()
             clearLastError()
+            setConnectStage(0)
             _isServiceRunning.value = false
             _trafficSnapshot.value = TunnelTrafficSnapshot()
             HollowTileService.requestTileUpdate(applicationContext)
@@ -174,6 +175,7 @@ class XrayVpnService : VpnService() {
 
         val gen = commandGeneration.incrementAndGet()
         clearLastError()
+        setConnectStage(1)
         _isServiceRunning.value = false
         _trafficSnapshot.value = TunnelTrafficSnapshot()
         appendLog(
@@ -238,6 +240,7 @@ class XrayVpnService : VpnService() {
         if (commandGeneration.get() != gen) return
 
         try {
+            setConnectStage(2)
             var tunFd = 0
             if (tunMode) {
                 val builder = Builder()
@@ -285,6 +288,7 @@ class XrayVpnService : VpnService() {
                 return
             }
 
+            setConnectStage(3)
             val isDirectOnly = routingMode.contains("Direct Only", ignoreCase = true)
             if (!isDirectOnly) {
                 val verifiedDelay = verifyLiveTunnelDelay(core)
@@ -336,6 +340,7 @@ class XrayVpnService : VpnService() {
             }
             _lastError.value = null
             _trafficSnapshot.value = TunnelTrafficSnapshot()
+            setConnectStage(0)
             _isServiceRunning.value = true
             HollowTileService.requestTileUpdate(applicationContext)
             startTrafficStatsPolling(gen, core)
@@ -635,6 +640,7 @@ class XrayVpnService : VpnService() {
     private fun fail(message: String) {
         Log.e(TAG, message)
         appendLog("ERROR: $message")
+        setConnectStage(0)
         _isServiceRunning.value = false
         _trafficSnapshot.value = TunnelTrafficSnapshot()
         _lastError.value = message
@@ -644,6 +650,7 @@ class XrayVpnService : VpnService() {
     override fun onRevoke() {
         appendLog("VPN permission revoked by Android OS")
         val gen = commandGeneration.incrementAndGet()
+        setConnectStage(0)
         _isServiceRunning.value = false
         _trafficSnapshot.value = TunnelTrafficSnapshot()
         _lastError.value = "VPN connection was revoked by Android OS"
@@ -654,6 +661,7 @@ class XrayVpnService : VpnService() {
 
     override fun onDestroy() {
         val gen = commandGeneration.incrementAndGet()
+        setConnectStage(0)
         _isServiceRunning.value = false
         _trafficSnapshot.value = TunnelTrafficSnapshot()
         HollowTileService.requestTileUpdate(applicationContext)
@@ -731,6 +739,7 @@ class XrayVpnService : VpnService() {
             appendLog("Xray core reported shutdown")
             if (commandGeneration.get() == generation) {
                 val expectedGen = commandGeneration.incrementAndGet()
+                setConnectStage(0)
                 _isServiceRunning.value = false
                 _trafficSnapshot.value = TunnelTrafficSnapshot()
                 enqueueCleanup(expectedGen = expectedGen, stopServiceAfter = true)
@@ -778,6 +787,8 @@ class XrayVpnService : VpnService() {
 
         private val _isServiceRunning = MutableStateFlow(false)
         val isServiceRunning: StateFlow<Boolean> = _isServiceRunning.asStateFlow()
+        private val _connectStage = MutableStateFlow(0)
+        val connectStage: StateFlow<Int> = _connectStage.asStateFlow()
         private val _lastError = MutableStateFlow<String?>(null)
         val lastError: StateFlow<String?> = _lastError.asStateFlow()
         private val _serviceNotice = MutableStateFlow<String?>(null)
@@ -786,6 +797,10 @@ class XrayVpnService : VpnService() {
         val trafficSnapshot: StateFlow<TunnelTrafficSnapshot> = _trafficSnapshot.asStateFlow()
         private val _logs = MutableStateFlow<List<String>>(emptyList())
         val logs: StateFlow<List<String>> = _logs.asStateFlow()
+
+        internal fun setConnectStage(stage: Int) {
+            _connectStage.value = stage
+        }
 
         fun clearLastError() {
             _lastError.value = null

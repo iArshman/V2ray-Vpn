@@ -68,7 +68,7 @@ class HollowBackgroundJobService : JobService() {
             val dao = VpnDatabase.getInstance(context).vpnDao()
             val prefs = VpnPreferencesStore(context)
             val settings = prefs.loadSettings()
-            val servers = dao.getAllServersOnce().take(15)
+            val servers = dao.getAllServersOnce().take(40)
             if (servers.isEmpty()) return
 
             val parser = V2RayParserAndFletcher()

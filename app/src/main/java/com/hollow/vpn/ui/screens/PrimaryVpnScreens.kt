@@ -31,13 +31,13 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.KeyboardArrowRight
-import androidx.compose.material.icons.outlined.VerifiedUser
 import androidx.compose.material.icons.rounded.Add
 import androidx.compose.material.icons.rounded.Check
 import androidx.compose.material.icons.rounded.MoreVert
 import androidx.compose.material.icons.rounded.Refresh
 import androidx.compose.material3.Checkbox
 import androidx.compose.material3.CheckboxDefaults
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.HorizontalDivider
@@ -50,9 +50,7 @@ import androidx.compose.material3.TextButton
 import androidx.compose.material3.VerticalDivider
 import androidx.compose.material3.minimumInteractiveComponentSize
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -74,13 +72,17 @@ import com.hollow.vpn.R
 import com.hollow.vpn.data.ServerEntity
 import com.hollow.vpn.ui.ConnectionTelemetryState
 import com.hollow.vpn.ui.components.FetchingSpinnerRing
+import com.hollow.vpn.ui.components.HollowBlinkingDot
 import com.hollow.vpn.ui.components.HollowBrandShieldLogo
 import com.hollow.vpn.ui.components.HollowDisconnectedExposureCard
-import com.hollow.vpn.ui.components.HollowProtectedSpeedChartCard
-import com.hollow.vpn.ui.components.HollowProtectedTunnelCard
+import com.hollow.vpn.ui.components.HollowIndeterminateBar
+import com.hollow.vpn.ui.components.HollowRouteCard
+import com.hollow.vpn.ui.components.HollowRouteState
 import com.hollow.vpn.ui.components.HollowSlideActionPill
+import com.hollow.vpn.ui.components.HollowSpeedBarsCard
 import com.hollow.vpn.ui.components.HollowStatusBrandRow
 import com.hollow.vpn.ui.components.HollowTopSquareButton
+import com.hollow.vpn.ui.components.countryCodeToFlagEmoji
 import com.hollow.vpn.ui.theme.HollowAmber
 import com.hollow.vpn.ui.theme.HollowCream
 import com.hollow.vpn.ui.theme.HollowCreamDivider
@@ -90,7 +92,6 @@ import com.hollow.vpn.ui.theme.HollowForestCard
 import com.hollow.vpn.ui.theme.HollowForestDivider
 import com.hollow.vpn.ui.theme.HollowForestMuted
 import com.hollow.vpn.ui.theme.HollowInk
-import com.hollow.vpn.ui.theme.HollowInkMuted
 import com.hollow.vpn.ui.theme.HollowInkSecondary
 import com.hollow.vpn.ui.theme.HollowLime
 import com.hollow.vpn.ui.theme.HollowObsidian
@@ -101,7 +102,6 @@ import com.hollow.vpn.ui.theme.HollowOrange
 import com.hollow.vpn.ui.theme.JetBrainsMonoFamily
 import com.hollow.vpn.ui.theme.SpaceGroteskFamily
 import com.hollow.vpn.ui.theme.TabularMonoBody
-import kotlinx.coroutines.delay
 import java.util.Locale
 import kotlin.math.max
 
@@ -356,9 +356,6 @@ private fun DisconnectedHomeContent(
             else -> "Current ISP"
         }
     }
-    val protocolLabel = selectedServer?.let { formatShortProtocolLabel(it.protocolCore) } ?: "—"
-    val pingLabel = selectedServer?.let { if (it.pingMs > 0) "${it.pingMs} ms" else "—" } ?: "—"
-    val trafficLabel = formatCompactTotalBytes(telemetry.uploadBytes + telemetry.downloadBytes)
 
     BoxWithConstraints(
         modifier = Modifier
@@ -366,15 +363,16 @@ private fun DisconnectedHomeContent(
             .widthIn(max = 600.dp)
             .padding(horizontal = 24.dp)
     ) {
-        val isCompact = maxHeight < 620.dp
+        val screenMaxHeight = maxHeight
+        val isCompact = screenMaxHeight < 620.dp
 
-        Column(
-            modifier = Modifier
-                .fillMaxSize()
-                .verticalScroll(rememberScrollState()),
-            verticalArrangement = Arrangement.SpaceBetween
-        ) {
-            Column(modifier = Modifier.fillMaxWidth()) {
+        Column(modifier = Modifier.fillMaxSize()) {
+            Column(
+                modifier = Modifier
+                    .weight(1f)
+                    .fillMaxWidth()
+                    .verticalScroll(rememberScrollState())
+            ) {
                 Spacer(modifier = Modifier.height(10.dp))
                 HomeTopBar(
                     dotColor = HollowOrange,
@@ -386,31 +384,37 @@ private fun DisconnectedHomeContent(
                     onOpenSettings = onOpenSettings
                 )
 
-                Spacer(modifier = Modifier.height(if (isCompact) 18.dp else 26.dp))
+                Spacer(modifier = Modifier.height(if (isCompact) 14.dp else 20.dp))
 
-                Text(
-                    text = "NOT PROTECTED",
-                    fontFamily = JetBrainsMonoFamily,
-                    fontWeight = FontWeight.SemiBold,
-                    fontSize = 11.sp,
-                    letterSpacing = 1.6.sp,
-                    color = HollowOrange
-                )
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    HollowBlinkingDot(color = HollowOrange)
+                    Text(
+                        text = "NOT PROTECTED",
+                        fontFamily = JetBrainsMonoFamily,
+                        fontWeight = FontWeight.SemiBold,
+                        fontSize = 11.sp,
+                        letterSpacing = 1.6.sp,
+                        color = HollowOrange
+                    )
+                }
 
-                Spacer(modifier = Modifier.height(8.dp))
+                Spacer(modifier = Modifier.height(6.dp))
 
                 Text(
                     text = "Your IP is visible.",
                     fontFamily = SpaceGroteskFamily,
                     fontWeight = FontWeight.Bold,
-                    fontSize = if (isCompact) 30.sp else 35.sp,
-                    lineHeight = if (isCompact) 35.sp else 40.sp,
+                    fontSize = if (isCompact) 30.sp else 34.sp,
+                    lineHeight = if (isCompact) 35.sp else 39.sp,
                     letterSpacing = (-0.8).sp,
                     color = HollowInk,
                     modifier = Modifier.testTag("connection_status_text")
                 )
 
-                Spacer(modifier = Modifier.height(8.dp))
+                Spacer(modifier = Modifier.height(6.dp))
 
                 Row(
                     modifier = Modifier
@@ -445,29 +449,16 @@ private fun DisconnectedHomeContent(
                     targetCountryCode = selectedServer?.countryCode,
                     targetCountryName = selectedServer?.countryName,
                     tunModeEnabled = tunModeEnabled,
-                    mapHeight = if (isCompact) 104.dp else 128.dp
+                    ispLabel = telemetry.realIspLabel,
+                    mapHeight = (screenMaxHeight - 540.dp).coerceIn(96.dp, 200.dp)
                 )
             }
 
             Column(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .padding(top = if (isCompact) 16.dp else 22.dp, bottom = 20.dp)
+                    .padding(top = 12.dp, bottom = 16.dp)
             ) {
-                ThreeColumnStatsGrid(
-                    dividerColor = HollowCreamDivider,
-                    labelColor = HollowInkSecondary,
-                    valueColor = HollowInk,
-                    col1Label = "PROTOCOL",
-                    col1Value = protocolLabel,
-                    col2Label = "PING",
-                    col2Value = pingLabel,
-                    col3Label = "TRAFFIC",
-                    col3Value = trafficLabel
-                )
-
-                Spacer(modifier = Modifier.height(18.dp))
-
                 // Quick Server / Add a Server Card (Page 1)
                 Surface(
                     modifier = Modifier
@@ -494,17 +485,19 @@ private fun DisconnectedHomeContent(
                                 .background(HollowInk),
                             contentAlignment = Alignment.Center
                         ) {
-                            val badgeCode = selectedServer?.countryCode
-                                ?.takeIf { it.isNotBlank() && !it.equals("XX", ignoreCase = true) }
-                                ?.uppercase()
-                                ?: "DE"
-                            Text(
-                                text = badgeCode,
-                                fontFamily = JetBrainsMonoFamily,
-                                fontWeight = FontWeight.SemiBold,
-                                fontSize = 13.sp,
-                                color = HollowCream
-                            )
+                            if (selectedServer != null) {
+                                Text(
+                                    text = countryCodeToFlagEmoji(selectedServer.countryCode),
+                                    fontSize = 22.sp
+                                )
+                            } else {
+                                Icon(
+                                    imageVector = Icons.Rounded.Add,
+                                    contentDescription = null,
+                                    tint = HollowCream,
+                                    modifier = Modifier.size(22.dp)
+                                )
+                            }
                         }
 
                         Spacer(modifier = Modifier.width(14.dp))
@@ -533,6 +526,25 @@ private fun DisconnectedHomeContent(
                                 maxLines = 1,
                                 overflow = TextOverflow.Ellipsis
                             )
+                        }
+
+                        if (selectedServer != null) {
+                            val pingColor = when {
+                                selectedServer.pingMs in 1..150 -> Color(0xFF15803D)
+                                selectedServer.pingMs in 151..450 -> HollowInk
+                                selectedServer.pingMs > 450 -> HollowOrange
+                                else -> HollowInkSecondary
+                            }
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Text(
+                                text = if (selectedServer.pingMs > 0) "${selectedServer.pingMs} ms" else "—",
+                                fontFamily = JetBrainsMonoFamily,
+                                fontWeight = FontWeight.SemiBold,
+                                fontSize = 12.5.sp,
+                                color = pingColor,
+                                maxLines = 1
+                            )
+                            Spacer(modifier = Modifier.width(4.dp))
                         }
 
                         Icon(
@@ -572,12 +584,7 @@ private fun ConnectingHomeContent(
     onOpenAddServer: () -> Unit,
     onOpenSettings: () -> Unit
 ) {
-    var activeStep by remember { mutableIntStateOf(2) }
-    LaunchedEffect(selectedServer?.id, telemetry.serverIpLabel) {
-        activeStep = 2
-        delay(1200L)
-        activeStep = 3
-    }
+    val activeStep = telemetry.connectingStage.coerceIn(1, 3)
 
     val countryName = selectedServer?.countryName ?: "Germany"
     val protocolShort = selectedServer?.let { formatShortProtocolLabel(it.protocolCore) } ?: "Xray"
@@ -595,13 +602,13 @@ private fun ConnectingHomeContent(
     ) {
         val isCompact = maxHeight < 620.dp
 
-        Column(
-            modifier = Modifier
-                .fillMaxSize()
-                .verticalScroll(rememberScrollState()),
-            verticalArrangement = Arrangement.SpaceBetween
-        ) {
-            Column(modifier = Modifier.fillMaxWidth()) {
+        Column(modifier = Modifier.fillMaxSize()) {
+            Column(
+                modifier = Modifier
+                    .weight(1f)
+                    .fillMaxWidth()
+                    .verticalScroll(rememberScrollState())
+            ) {
                 Spacer(modifier = Modifier.height(10.dp))
                 HomeTopBar(
                     dotColor = HollowAmber,
@@ -613,16 +620,22 @@ private fun ConnectingHomeContent(
                     onOpenSettings = onOpenSettings
                 )
 
-                Spacer(modifier = Modifier.height(if (isCompact) 24.dp else 38.dp))
+                Spacer(modifier = Modifier.height(if (isCompact) 20.dp else 32.dp))
 
-                Text(
-                    text = "CONNECTING",
-                    fontFamily = JetBrainsMonoFamily,
-                    fontWeight = FontWeight.SemiBold,
-                    fontSize = 11.sp,
-                    letterSpacing = 1.6.sp,
-                    color = HollowAmber
-                )
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    HollowBlinkingDot(color = HollowAmber)
+                    Text(
+                        text = "CONNECTING",
+                        fontFamily = JetBrainsMonoFamily,
+                        fontWeight = FontWeight.SemiBold,
+                        fontSize = 11.sp,
+                        letterSpacing = 1.6.sp,
+                        color = HollowAmber
+                    )
+                }
 
                 Spacer(modifier = Modifier.height(10.dp))
 
@@ -637,13 +650,20 @@ private fun ConnectingHomeContent(
                     modifier = Modifier.testTag("connection_status_text")
                 )
 
-                Spacer(modifier = Modifier.height(if (isCompact) 20.dp else 30.dp))
+                Spacer(modifier = Modifier.height(14.dp))
+
+                HollowIndeterminateBar(
+                    color = HollowAmber,
+                    track = HollowObsidianDivider
+                )
+
+                Spacer(modifier = Modifier.height(if (isCompact) 14.dp else 24.dp))
 
                 // Step 1: Server reached
                 ConnectingStepRow(
                     stepNumber = 1,
-                    isCompleted = true,
-                    isActive = false,
+                    isCompleted = activeStep > 1,
+                    isActive = activeStep == 1,
                     label = "Server reached · $countryName"
                 )
                 HorizontalDivider(thickness = 1.dp, color = HollowObsidianDivider)
@@ -670,7 +690,7 @@ private fun ConnectingHomeContent(
             Column(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .padding(top = 20.dp, bottom = 22.dp)
+                    .padding(top = 14.dp, bottom = 16.dp)
             ) {
                 ThreeColumnStatsGrid(
                     dividerColor = HollowObsidianDivider,
@@ -684,7 +704,7 @@ private fun ConnectingHomeContent(
                     col3Value = serverAddr
                 )
 
-                Spacer(modifier = Modifier.height(24.dp))
+                Spacer(modifier = Modifier.height(18.dp))
 
                 Surface(
                     modifier = Modifier
@@ -726,36 +746,37 @@ private fun ConnectingStepRow(
             .padding(vertical = 15.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
-        val circleColor = when {
-            isCompleted || isActive -> HollowAmber
-            else -> HollowObsidianDivider
-        }
-        val contentColor = when {
-            isCompleted || isActive -> HollowObsidian
-            else -> HollowObsidianMuted
-        }
-
         Box(
             modifier = Modifier
-                .size(28.dp)
+                .size(32.dp)
                 .clip(CircleShape)
-                .background(circleColor),
+                .then(
+                    when {
+                        isCompleted -> Modifier.background(HollowAmber)
+                        isActive -> Modifier.border(2.dp, HollowAmber, CircleShape)
+                        else -> Modifier.border(2.dp, HollowObsidianDivider, CircleShape)
+                    }
+                ),
             contentAlignment = Alignment.Center
         ) {
-            if (isCompleted) {
-                Icon(
+            when {
+                isCompleted -> Icon(
                     imageVector = Icons.Rounded.Check,
                     contentDescription = null,
-                    tint = contentColor,
-                    modifier = Modifier.size(16.dp)
+                    tint = HollowObsidian,
+                    modifier = Modifier.size(18.dp)
                 )
-            } else {
-                Text(
+                isActive -> CircularProgressIndicator(
+                    modifier = Modifier.size(16.dp),
+                    color = HollowAmber,
+                    strokeWidth = 2.dp
+                )
+                else -> Text(
                     text = stepNumber.toString(),
                     fontFamily = JetBrainsMonoFamily,
                     fontWeight = FontWeight.Bold,
                     fontSize = 12.sp,
-                    color = contentColor
+                    color = HollowObsidianMuted
                 )
             }
         }
@@ -785,7 +806,6 @@ private fun ProtectedHomeContent(
     onOpenSettings: () -> Unit
 ) {
     val countryName = selectedServer?.countryName ?: "VPN"
-    val countryCode = selectedServer?.countryCode ?: "VP"
     val serverIp = selectedServer?.resolvedIp?.ifBlank { selectedServer.host }
         ?: telemetry.serverIpLabel
     val realIpText = remember(telemetry.preConnectionIp, telemetry.realPublicIpLabel) {
@@ -805,15 +825,15 @@ private fun ProtectedHomeContent(
             .widthIn(max = 600.dp)
             .padding(horizontal = 24.dp)
     ) {
-        val isCompact = maxHeight < 680.dp
+        val isCompact = maxHeight < 700.dp
 
-        Column(
-            modifier = Modifier
-                .fillMaxSize()
-                .verticalScroll(rememberScrollState()),
-            verticalArrangement = Arrangement.SpaceBetween
-        ) {
-            Column(modifier = Modifier.fillMaxWidth()) {
+        Column(modifier = Modifier.fillMaxSize()) {
+            Column(
+                modifier = Modifier
+                    .weight(1f)
+                    .fillMaxWidth()
+                    .verticalScroll(rememberScrollState())
+            ) {
                 Spacer(modifier = Modifier.height(10.dp))
                 HomeTopBar(
                     dotColor = HollowLime,
@@ -829,14 +849,9 @@ private fun ProtectedHomeContent(
 
                 Row(
                     verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
-                    Icon(
-                        imageVector = Icons.Outlined.VerifiedUser,
-                        contentDescription = null,
-                        tint = HollowLime,
-                        modifier = Modifier.size(14.dp)
-                    )
+                    HollowBlinkingDot(color = HollowLime)
                     Text(
                         text = "PROTECTED",
                         fontFamily = JetBrainsMonoFamily,
@@ -854,8 +869,8 @@ private fun ProtectedHomeContent(
                     text = telemetry.formattedTimer,
                     fontFamily = JetBrainsMonoFamily,
                     fontWeight = FontWeight.Medium,
-                    fontSize = if (isCompact) 36.sp else 42.sp,
-                    letterSpacing = 1.sp,
+                    fontSize = if (isCompact) 40.sp else 48.sp,
+                    letterSpacing = (-1).sp,
                     color = HollowCream,
                     modifier = Modifier.testTag("connection_timer_text")
                 )
@@ -913,31 +928,29 @@ private fun ProtectedHomeContent(
 
                 Spacer(modifier = Modifier.height(if (isCompact) 14.dp else 18.dp))
 
-                HollowProtectedTunnelCard(
-                    countryCode = countryCode,
-                    countryName = countryName,
-                    realIp = realIpText,
-                    websitesSeeIp = serverIp
+                HollowRouteCard(
+                    state = HollowRouteState.SECURED,
+                    serverLabel = countryName,
+                    realIp = realIpText.ifBlank { null },
+                    exitIp = serverIp.ifBlank { null }
                 )
 
                 Spacer(modifier = Modifier.height(12.dp))
 
-                HollowProtectedSpeedChartCard(
-                    downloadNum = dlNum,
+                HollowSpeedBarsCard(
+                    downloadValue = dlNum,
                     downloadUnit = dlUnit,
-                    uploadNum = ulNum,
+                    uploadValue = ulNum,
                     uploadUnit = ulUnit,
                     downloadBytesPerSec = telemetry.downloadBytesPerSec,
-                    uploadBytesPerSec = telemetry.uploadBytesPerSec,
-                    elapsedSeconds = telemetry.elapsedSeconds,
-                    chartHeight = if (isCompact) 44.dp else 54.dp
+                    elapsedSeconds = telemetry.elapsedSeconds
                 )
             }
 
             Column(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .padding(top = 14.dp, bottom = 18.dp)
+                    .padding(top = 12.dp, bottom = 16.dp)
             ) {
                 ThreeColumnStatsGrid(
                     dividerColor = HollowForestDivider,
@@ -951,7 +964,7 @@ private fun ProtectedHomeContent(
                     col3Value = totalText
                 )
 
-                Spacer(modifier = Modifier.height(18.dp))
+                Spacer(modifier = Modifier.height(14.dp))
 
                 HollowSlideActionPill(
                     label = "Slide to disconnect",
@@ -1029,12 +1042,11 @@ private fun ThreeColumnStatsGrid(
             StatGridCell(
                 label = col1Label,
                 value = col1Value,
-                dividerColor = dividerColor,
                 labelColor = labelColor,
                 valueColor = valueColor,
                 modifier = Modifier
-                    .weight(1.1f)
-                    .padding(end = 10.dp, top = 16.dp, bottom = 10.dp)
+                    .weight(1.35f)
+                    .padding(end = 10.dp, top = 14.dp, bottom = 8.dp)
             )
             VerticalDivider(
                 thickness = 1.dp,
@@ -1044,12 +1056,11 @@ private fun ThreeColumnStatsGrid(
             StatGridCell(
                 label = col2Label,
                 value = col2Value,
-                dividerColor = dividerColor,
                 labelColor = labelColor,
                 valueColor = valueColor,
                 modifier = Modifier
-                    .weight(0.85f)
-                    .padding(horizontal = 12.dp, vertical = 12.dp)
+                    .weight(0.8f)
+                    .padding(horizontal = 10.dp, vertical = 10.dp)
                     .padding(top = 4.dp)
             )
             VerticalDivider(
@@ -1060,12 +1071,11 @@ private fun ThreeColumnStatsGrid(
             StatGridCell(
                 label = col3Label,
                 value = col3Value,
-                dividerColor = dividerColor,
                 labelColor = labelColor,
                 valueColor = valueColor,
                 modifier = Modifier
-                    .weight(1.05f)
-                    .padding(start = 12.dp, top = 16.dp, bottom = 10.dp)
+                    .weight(1.0f)
+                    .padding(start = 10.dp, top = 14.dp, bottom = 8.dp)
             )
         }
     }
@@ -1075,7 +1085,6 @@ private fun ThreeColumnStatsGrid(
 private fun StatGridCell(
     label: String,
     value: String,
-    dividerColor: Color,
     labelColor: Color,
     valueColor: Color,
     modifier: Modifier = Modifier
@@ -1090,25 +1099,16 @@ private fun StatGridCell(
             color = labelColor,
             maxLines = 1
         )
-        Spacer(modifier = Modifier.height(14.dp))
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            Box(
-                modifier = Modifier
-                    .width(1.dp)
-                    .height(24.dp)
-                    .background(dividerColor)
-            )
-            Spacer(modifier = Modifier.width(10.dp))
-            Text(
-                text = value,
-                fontFamily = JetBrainsMonoFamily,
-                fontWeight = FontWeight.Medium,
-                fontSize = 14.5.sp,
-                color = valueColor,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis
-            )
-        }
+        Spacer(modifier = Modifier.height(10.dp))
+        Text(
+            text = value,
+            fontFamily = JetBrainsMonoFamily,
+            fontWeight = FontWeight.Medium,
+            fontSize = 14.5.sp,
+            color = valueColor,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis
+        )
     }
 }
 
@@ -1127,7 +1127,8 @@ fun ServerItemRowContent(
     onShareQr: () -> Unit = {},
     isSelectionMode: Boolean = false,
     isCheckedForBatch: Boolean = false,
-    onToggleBatchCheck: () -> Unit = {}
+    onToggleBatchCheck: () -> Unit = {},
+    showCountryBadge: Boolean = false
 ) {
     var menuExpanded by remember { mutableStateOf(false) }
     val context = LocalContext.current
@@ -1165,8 +1166,18 @@ fun ServerItemRowContent(
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(6.dp)
             ) {
+                if (showCountryBadge) {
+                    Text(
+                        text = countryCodeToFlagEmoji(server.countryCode),
+                        fontSize = 18.sp
+                    )
+                }
                 Text(
-                    text = cleanProtocol,
+                    text = if (showCountryBadge) {
+                        server.countryName.ifBlank { cleanProtocol }
+                    } else {
+                        cleanProtocol
+                    },
                     style = MaterialTheme.typography.titleSmall.copy(fontSize = 14.sp),
                     color = HollowInk,
                     maxLines = 1,
@@ -1203,8 +1214,9 @@ fun ServerItemRowContent(
                 }
             }
             Spacer(modifier = Modifier.height(2.dp))
+            val addrText = "${server.resolvedIp.ifBlank { server.host }}:${server.port}"
             Text(
-                text = "${server.resolvedIp.ifBlank { server.host }}:${server.port}",
+                text = if (showCountryBadge) "$cleanProtocol · $addrText" else addrText,
                 style = TabularMonoBody.copy(fontSize = 12.sp, fontWeight = FontWeight.Normal),
                 color = HollowInkSecondary,
                 maxLines = 1,
